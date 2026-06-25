@@ -42,7 +42,7 @@ type WindowSummary = { app_name: string; window_title: string; category: string;
 type TimelineApp = { app_name: string; category: string; seconds: number };
 type TimelinePoint = { hour: string; active_seconds: number; idle_seconds: number; top_apps: TimelineApp[] };
 type LiveWindow = { app_name: string; window_title: string; category: string; visible_area: number; visible_share: number; focused: boolean };
-type DonutSegment = { key: string; label: string; valueLabel: string; shareLabel: string; color: string; share: number };
+type DonutSegment = { key: string; label: string; lines?: TooltipLine[]; valueLabel: string; shareLabel: string; color: string; share: number };
 type TooltipLine = { color?: string; label: string; value: string };
 type FloatingTooltipData = { color?: string; lines?: TooltipLine[]; primary: string; secondary?: string; title: string; x: number; y: number };
 type TooltipControls = { hideTooltip: () => void; showTooltip: (tooltip: FloatingTooltipData) => void };
@@ -400,7 +400,7 @@ function App() {
   const [rangePreset, setRangePreset] = useState<RangePreset>(() => readStorage("pctime-range", "day"));
   const [customStart, setCustomStart] = useState(() => toLocalInput(startOfToday()));
   const [customEnd, setCustomEnd] = useState(() => toLocalInput(new Date()));
-  const [appVersion, setAppVersion] = useState("0.1.3");
+  const [appVersion, setAppVersion] = useState("0.1.4");
   const [startupEnabled, setStartupEnabled] = useState<boolean | null>(null);
   const [closeToTray, setCloseToTray] = useState<boolean | null>(null);
   const [updateState, setUpdateState] = useState<UpdateState>(emptyUpdateState);
@@ -463,7 +463,7 @@ function App() {
   useEffect(() => {
     void appInvoke<string>("get_app_version")
       .then(setAppVersion)
-      .catch(() => setAppVersion("0.1.3"));
+      .catch(() => setAppVersion("0.1.4"));
   }, []);
 
   useEffect(() => {
@@ -787,7 +787,7 @@ function ActivePage({
         <Timeline hideTooltip={hideTooltip} points={dashboard.timeline} showTooltip={showTooltip} t={t} />
       </Panel>
       <Panel title={t.panels.categoryMix} action={<PieChart size={18} />}>
-        <CategoryDonut categories={dashboard.categories} hideTooltip={hideTooltip} showTooltip={showTooltip} t={t} />
+        <CategoryDonut apps={dashboard.apps} categories={dashboard.categories} hideTooltip={hideTooltip} showTooltip={showTooltip} t={t} />
       </Panel>
       <Panel title={t.panels.topApps} className="fill-panel" action={<BarChart3 size={18} />}>
         <TopAppsVisual apps={dashboard.apps.slice(0, 12)} hideTooltip={hideTooltip} showTooltip={showTooltip} t={t} />
@@ -894,11 +894,11 @@ function CategoryRow({ category, t }: { category: CategorySummary; t: UiCopy }) 
   );
 }
 
-function CategoryDonut({ categories, hideTooltip, showTooltip, t }: { categories: CategorySummary[]; t: UiCopy } & TooltipControls) {
+function CategoryDonut({ apps, categories, hideTooltip, showTooltip, t }: { apps: AppSummary[]; categories: CategorySummary[]; t: UiCopy } & TooltipControls) {
   if (!categories.length) return <EmptyState label={t.empty.noActivity} />;
 
   const totalSeconds = categories.reduce((sum, category) => sum + category.seconds, 0);
-  const segments = buildCategorySegments(categories, t);
+  const segments = buildCategorySegments(categories, apps, t);
 
   return (
     <div className="donut-layout">
@@ -1009,6 +1009,7 @@ function RingDonut({
     setActive(segment);
     showTooltip({
       color: segment.color,
+      lines: segment.lines,
       primary: segment.valueLabel,
       secondary: segment.shareLabel,
       title: segment.label,
@@ -1178,13 +1179,15 @@ function FloatingTooltip({ color, lines = [], primary, secondary, title, x, y }:
   );
 }
 
-function buildCategorySegments(categories: CategorySummary[], t: UiCopy): DonutSegment[] {
+function buildCategorySegments(categories: CategorySummary[], apps: AppSummary[], t: UiCopy): DonutSegment[] {
   const totalSeconds = Math.max(categories.reduce((sum, category) => sum + category.seconds, 0), 1);
   const top = categories.slice(0, 6);
   const topSeconds = top.reduce((sum, category) => sum + category.seconds, 0);
+  const topCategoryNames = new Set(top.map((category) => category.category));
   const segments = top.map((category) => ({
     key: category.category,
     label: categoryLabel(category.category, t),
+    lines: categoryAppLines(apps, category.category, category.seconds, t),
     valueLabel: formatDuration(category.seconds),
     shareLabel: formatPercent(category.seconds / totalSeconds),
     color: categoryColor(category.category),
@@ -1196,6 +1199,7 @@ function buildCategorySegments(categories: CategorySummary[], t: UiCopy): DonutS
     segments.push({
       key: "Other",
       label: categoryLabel("Other", t),
+      lines: categoryAppLines(apps.filter((app) => !topCategoryNames.has(app.category)), null, otherSeconds, t),
       valueLabel: formatDuration(otherSeconds),
       shareLabel: formatPercent(otherSeconds / totalSeconds),
       color: categoryColor("Other"),
@@ -1204,6 +1208,18 @@ function buildCategorySegments(categories: CategorySummary[], t: UiCopy): DonutS
   }
 
   return normalizeSegments(segments);
+}
+
+function categoryAppLines(apps: AppSummary[], category: string | null, totalSeconds: number, t: UiCopy): TooltipLine[] {
+  const candidates = category === null ? apps : apps.filter((app) => app.category === category);
+  return [...candidates]
+    .sort((left, right) => right.seconds - left.seconds)
+    .slice(0, 5)
+    .map((app, index) => ({
+      color: appColor(app, index),
+      label: app.app_name,
+      value: `${formatDuration(app.seconds)} - ${formatPercent(totalSeconds > 0 ? app.seconds / totalSeconds : 0)}${category === null ? ` - ${categoryLabel(app.category, t)}` : ""}`,
+    }));
 }
 
 function buildAppSegments(apps: AppSummary[]): DonutSegment[] {
@@ -1450,7 +1466,7 @@ async function appInvoke<T>(command: string, args?: Record<string, unknown>): Pr
 
 function demoResponse(command: string, args?: Record<string, unknown>) {
   if (command === "get_dashboard") return demoDashboard(args?.range as RangePayload | undefined);
-  if (command === "get_app_version") return "0.1.3";
+  if (command === "get_app_version") return "0.1.4";
   if (command === "get_startup_enabled") return false;
   if (command === "set_startup_enabled") return Boolean(args?.enabled);
   if (command === "get_close_to_tray") return true;

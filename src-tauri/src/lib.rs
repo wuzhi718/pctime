@@ -16,7 +16,7 @@ use std::thread;
 use std::time::Duration;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
-use tauri::tray::{TrayIconBuilder, TrayIconEvent};
+use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri::WindowEvent;
 use tauri_plugin_opener::OpenerExt;
@@ -119,7 +119,14 @@ pub fn run() {
                     .tooltip("PCTime")
                     .show_menu_on_left_click(false)
                     .on_tray_icon_event(|tray, event| match event {
-                        TrayIconEvent::Click { .. } | TrayIconEvent::DoubleClick { .. } => {
+                        TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            ..
+                        }
+                        | TrayIconEvent::DoubleClick {
+                            button: MouseButton::Left,
+                            ..
+                        } => {
                             show_main_window(tray.app_handle());
                         }
                         _ => {}
