@@ -22,7 +22,7 @@ import {
   TimerReset,
   type LucideIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState, type CSSProperties, type MouseEvent, type PointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import "./App.css";
@@ -44,6 +44,7 @@ type LiveWindow = { app_name: string; window_title: string; category: string; vi
 type DonutSegment = { key: string; label: string; valueLabel: string; shareLabel: string; color: string; share: number };
 type TooltipLine = { color?: string; label: string; value: string };
 type FloatingTooltipData = { color?: string; lines?: TooltipLine[]; primary: string; secondary?: string; title: string; x: number; y: number };
+type TooltipControls = { hideTooltip: () => void; showTooltip: (tooltip: FloatingTooltipData) => void };
 type GitHubReleaseAsset = { browser_download_url: string; name: string };
 type GitHubRelease = { assets: GitHubReleaseAsset[]; body?: string; html_url: string; tag_name: string };
 type UpdateState = {
@@ -398,13 +399,14 @@ function App() {
   const [rangePreset, setRangePreset] = useState<RangePreset>(() => readStorage("pctime-range", "day"));
   const [customStart, setCustomStart] = useState(() => toLocalInput(startOfToday()));
   const [customEnd, setCustomEnd] = useState(() => toLocalInput(new Date()));
-  const [appVersion, setAppVersion] = useState("0.1.1");
+  const [appVersion, setAppVersion] = useState("0.1.2");
   const [startupEnabled, setStartupEnabled] = useState<boolean | null>(null);
   const [closeToTray, setCloseToTray] = useState<boolean | null>(null);
   const [updateState, setUpdateState] = useState<UpdateState>(emptyUpdateState);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [floatingTooltip, setFloatingTooltip] = useState<FloatingTooltipData | null>(null);
   const [query, setQuery] = useState("");
   const t = copy[locale];
 
@@ -460,7 +462,7 @@ function App() {
   useEffect(() => {
     void appInvoke<string>("get_app_version")
       .then(setAppVersion)
-      .catch(() => setAppVersion("0.1.1"));
+      .catch(() => setAppVersion("0.1.2"));
   }, []);
 
   useEffect(() => {
@@ -496,6 +498,9 @@ function App() {
         categoryLabel(app.category, t).toLowerCase().includes(value),
     );
   }, [dashboard, query, t]);
+
+  const showTooltip = useCallback((tooltip: FloatingTooltipData) => setFloatingTooltip(tooltip), []);
+  const hideTooltip = useCallback(() => setFloatingTooltip(null), []);
 
   async function refreshNow() {
     setRefreshing(true);
@@ -621,6 +626,8 @@ function App() {
               setQuery={setQuery}
               setStartupEnabled={changeStartup}
               setTheme={setTheme}
+              showTooltip={showTooltip}
+              hideTooltip={hideTooltip}
               startupEnabled={startupEnabled}
               t={t}
               theme={theme}
@@ -633,6 +640,9 @@ function App() {
           )}
         </section>
       </section>
+      <div className="floating-layer">
+        {floatingTooltip ? <FloatingTooltip {...floatingTooltip} /> : null}
+      </div>
     </main>
   );
 }
@@ -650,6 +660,8 @@ function ActivePage({
   setQuery,
   setStartupEnabled,
   setTheme,
+  showTooltip,
+  hideTooltip,
   startupEnabled,
   t,
   theme,
@@ -668,6 +680,8 @@ function ActivePage({
   setQuery: (value: string) => void;
   setStartupEnabled: (enabled: boolean) => void;
   setTheme: (value: Theme) => void;
+  showTooltip: (tooltip: FloatingTooltipData) => void;
+  hideTooltip: () => void;
   startupEnabled: boolean | null;
   t: UiCopy;
   theme: Theme;
@@ -755,13 +769,13 @@ function ActivePage({
         {dashboard.cards.map((card) => <MetricTile key={card.label} card={card} t={t} />)}
       </section>
       <Panel title={t.panels.timeline} action={<CalendarDays size={18} />}>
-        <Timeline points={dashboard.timeline} t={t} />
+        <Timeline hideTooltip={hideTooltip} points={dashboard.timeline} showTooltip={showTooltip} t={t} />
       </Panel>
       <Panel title={t.panels.categoryMix} action={<PieChart size={18} />}>
-        <CategoryDonut categories={dashboard.categories} t={t} />
+        <CategoryDonut categories={dashboard.categories} hideTooltip={hideTooltip} showTooltip={showTooltip} t={t} />
       </Panel>
       <Panel title={t.panels.topApps} className="fill-panel" action={<BarChart3 size={18} />}>
-        <TopAppsVisual apps={dashboard.apps.slice(0, 12)} t={t} />
+        <TopAppsVisual apps={dashboard.apps.slice(0, 12)} hideTooltip={hideTooltip} showTooltip={showTooltip} t={t} />
       </Panel>
     </div>
   );
@@ -865,7 +879,7 @@ function CategoryRow({ category, t }: { category: CategorySummary; t: UiCopy }) 
   );
 }
 
-function CategoryDonut({ categories, t }: { categories: CategorySummary[]; t: UiCopy }) {
+function CategoryDonut({ categories, hideTooltip, showTooltip, t }: { categories: CategorySummary[]; t: UiCopy } & TooltipControls) {
   if (!categories.length) return <EmptyState label={t.empty.noActivity} />;
 
   const totalSeconds = categories.reduce((sum, category) => sum + category.seconds, 0);
@@ -876,7 +890,9 @@ function CategoryDonut({ categories, t }: { categories: CategorySummary[]; t: Ui
       <RingDonut
         centerLabel={t.table.visible}
         centerValue={formatDuration(totalSeconds)}
+        hideTooltip={hideTooltip}
         segments={segments}
+        showTooltip={showTooltip}
       />
       <div className="donut-legend">
         {segments.map((segment) => (
@@ -916,18 +932,18 @@ function AppBarList({ apps, t }: { apps: AppSummary[]; t: UiCopy }) {
   );
 }
 
-function TopAppsVisual({ apps, t }: { apps: AppSummary[]; t: UiCopy }) {
+function TopAppsVisual({ apps, hideTooltip, showTooltip, t }: { apps: AppSummary[]; t: UiCopy } & TooltipControls) {
   if (!apps.length) return <EmptyState label={t.empty.noApps} />;
 
   return (
     <div className="top-apps-layout">
       <AppBarList apps={apps} t={t} />
-      <AppShareDonut apps={apps.slice(0, 8)} t={t} />
+      <AppShareDonut apps={apps.slice(0, 8)} hideTooltip={hideTooltip} showTooltip={showTooltip} t={t} />
     </div>
   );
 }
 
-function AppShareDonut({ apps, t }: { apps: AppSummary[]; t: UiCopy }) {
+function AppShareDonut({ apps, hideTooltip, showTooltip, t }: { apps: AppSummary[]; t: UiCopy } & TooltipControls) {
   const totalSeconds = Math.max(apps.reduce((sum, app) => sum + app.seconds, 0), 1);
   const segments = buildAppSegments(apps);
 
@@ -936,7 +952,9 @@ function AppShareDonut({ apps, t }: { apps: AppSummary[]; t: UiCopy }) {
       <RingDonut
         centerLabel={t.table.application}
         centerValue={String(apps.length)}
+        hideTooltip={hideTooltip}
         segments={segments}
+        showTooltip={showTooltip}
         compact
       />
       <div className="mini-donut-list">
@@ -952,9 +970,20 @@ function AppShareDonut({ apps, t }: { apps: AppSummary[]; t: UiCopy }) {
   );
 }
 
-function RingDonut({ centerLabel, centerValue, compact = false, segments }: { centerLabel: string; centerValue: string; compact?: boolean; segments: DonutSegment[] }) {
+function RingDonut({
+  centerLabel,
+  centerValue,
+  compact = false,
+  hideTooltip,
+  segments,
+  showTooltip,
+}: {
+  centerLabel: string;
+  centerValue: string;
+  compact?: boolean;
+  segments: DonutSegment[];
+} & TooltipControls) {
   const [active, setActive] = useState<DonutSegment | null>(null);
-  const [tooltip, setTooltip] = useState({ x: 0, y: 0 });
   const radius = 46;
   const stroke = compact ? 12 : 14;
   const circumference = 2 * Math.PI * radius;
@@ -963,42 +992,26 @@ function RingDonut({ centerLabel, centerValue, compact = false, segments }: { ce
 
   const showSegment = (segment: DonutSegment, event: { clientX: number; clientY: number }) => {
     setActive(segment);
-    setTooltip({ x: event.clientX, y: event.clientY });
+    showTooltip({
+      color: segment.color,
+      primary: segment.valueLabel,
+      secondary: segment.shareLabel,
+      title: segment.label,
+      x: event.clientX,
+      y: event.clientY,
+    });
   };
 
-  const locateSegment = (event: PointerEvent<HTMLDivElement> | MouseEvent<HTMLDivElement>) => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    const centerX = rect.left + rect.width / 2;
-    const centerY = rect.top + rect.height / 2;
-    const x = event.clientX - centerX;
-    const y = event.clientY - centerY;
-    const distance = Math.hypot(x, y);
-    const outerRadius = Math.min(rect.width, rect.height) / 2;
-    const innerRadius = outerRadius * 0.54;
-
-    if (distance < innerRadius || distance > outerRadius) {
-      setActive(null);
-      return;
-    }
-
-    const angle = (Math.atan2(y, x) * 180 / Math.PI + 90 + 360) % 360;
-    const ratio = angle / 360;
-    let cursorShare = 0;
-    const segment = segments.find((item) => {
-      const start = cursorShare;
-      cursorShare += item.share;
-      return ratio >= start && ratio <= cursorShare;
-    }) ?? segments[segments.length - 1];
-
-    if (segment) showSegment(segment, event);
+  const hideSegment = () => {
+    setActive(null);
+    hideTooltip();
   };
 
   return (
     <div
       className={compact ? "ring-donut compact-ring" : "ring-donut"}
-      onClick={locateSegment}
-      onPointerLeave={() => setActive(null)}
-      onPointerMove={locateSegment}
+      onMouseLeave={hideSegment}
+      onPointerLeave={hideSegment}
     >
       <svg viewBox="0 0 120 120">
         <circle className="donut-base" cx="60" cy="60" r={radius} strokeWidth={stroke} />
@@ -1025,12 +1038,16 @@ function RingDonut({ centerLabel, centerValue, compact = false, segments }: { ce
               tabIndex={0}
               transform="rotate(-90 60 60)"
               aria-label={`${segment.label}: ${segment.valueLabel}, ${segment.shareLabel}`}
-              onBlur={() => setActive(null)}
+              onBlur={hideSegment}
               onFocus={(event) => {
                 const rect = event.currentTarget.getBoundingClientRect();
                 setActive(segment);
-                setTooltip({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+                showSegment(segment, { clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 });
               }}
+              onMouseEnter={(event) => showSegment(segment, event)}
+              onMouseMove={(event) => showSegment(segment, event)}
+              onPointerEnter={(event) => showSegment(segment, event)}
+              onPointerMove={(event) => showSegment(segment, event)}
             >
             </circle>
           );
@@ -1040,22 +1057,11 @@ function RingDonut({ centerLabel, centerValue, compact = false, segments }: { ce
         <strong>{centerValue}</strong>
         <span>{centerLabel}</span>
       </div>
-      {active ? (
-        <FloatingTooltip
-          color={active.color}
-          primary={active.valueLabel}
-          secondary={active.shareLabel}
-          title={active.label}
-          x={tooltip.x}
-          y={tooltip.y}
-        />
-      ) : null}
     </div>
   );
 }
 
-function Timeline({ points, t }: { points: TimelinePoint[]; t: UiCopy }) {
-  const [tooltip, setTooltip] = useState<FloatingTooltipData | null>(null);
+function Timeline({ hideTooltip, points, showTooltip, t }: { points: TimelinePoint[]; t: UiCopy } & TooltipControls) {
   if (!points.length) return <EmptyState label="No timeline" />;
   const maxSeconds = Math.max(...points.map((point) => point.active_seconds + point.idle_seconds), 1);
   const style = { "--timeline-count": points.length } as CSSProperties;
@@ -1065,6 +1071,21 @@ function Timeline({ points, t }: { points: TimelinePoint[]; t: UiCopy }) {
       .map((app) => `${app.app_name} - ${categoryLabel(app.category, t)} - ${formatDuration(app.seconds)} - ${point.active_seconds > 0 ? formatPercent(Math.min(app.seconds / point.active_seconds, 1)) : "0%"}`)
       .join("; ");
     return `${point.hour}. ${t.table.visible}: ${formatDuration(point.active_seconds)}${point.idle_seconds > 0 ? `. ${t.cards["Idle time"][0]}: ${formatDuration(point.idle_seconds)}` : ""}${apps ? `. Top apps: ${apps}` : ""}`;
+  };
+
+  const showPointTooltip = (point: TimelinePoint, event: { clientX: number; clientY: number }) => {
+    showTooltip({
+      title: point.hour,
+      primary: `${t.table.visible}: ${formatDuration(point.active_seconds)}`,
+      secondary: point.idle_seconds > 0 ? `${t.cards["Idle time"][0]}: ${formatDuration(point.idle_seconds)}` : undefined,
+      x: event.clientX,
+      y: event.clientY,
+      lines: point.top_apps.map((app) => ({
+        color: categoryColor(app.category),
+        label: app.app_name,
+        value: `${categoryLabel(app.category, t)} - ${formatDuration(app.seconds)} - ${point.active_seconds > 0 ? formatPercent(Math.min(app.seconds / point.active_seconds, 1)) : "0%"}`,
+      })),
+    });
   };
 
   return (
@@ -1079,21 +1100,18 @@ function Timeline({ points, t }: { points: TimelinePoint[]; t: UiCopy }) {
               key={point.hour}
               aria-label={pointLabel(point)}
               data-active={point.active_seconds}
-              onPointerLeave={() => setTooltip(null)}
-              onPointerMove={(event) => {
-                setTooltip({
-                  title: point.hour,
-                  primary: `${t.table.visible}: ${formatDuration(point.active_seconds)}`,
-                  secondary: point.idle_seconds > 0 ? `${t.cards["Idle time"][0]}: ${formatDuration(point.idle_seconds)}` : undefined,
-                  x: event.clientX,
-                  y: event.clientY,
-                  lines: point.top_apps.map((app) => ({
-                    color: categoryColor(app.category),
-                    label: app.app_name,
-                    value: `${categoryLabel(app.category, t)} - ${formatDuration(app.seconds)} - ${point.active_seconds > 0 ? formatPercent(Math.min(app.seconds / point.active_seconds, 1)) : "0%"}`,
-                  })),
-                });
+              tabIndex={0}
+              onBlur={hideTooltip}
+              onFocus={(event) => {
+                const rect = event.currentTarget.getBoundingClientRect();
+                showPointTooltip(point, { clientX: rect.left + rect.width / 2, clientY: rect.top + 24 });
               }}
+              onMouseEnter={(event) => showPointTooltip(point, event)}
+              onMouseLeave={hideTooltip}
+              onMouseMove={(event) => showPointTooltip(point, event)}
+              onPointerEnter={(event) => showPointTooltip(point, event)}
+              onPointerLeave={hideTooltip}
+              onPointerMove={(event) => showPointTooltip(point, event)}
             >
               <div className="timeline-bars">
                 <span className="timeline-idle" style={{ height: `${idleHeight}%` }} />
@@ -1104,7 +1122,6 @@ function Timeline({ points, t }: { points: TimelinePoint[]; t: UiCopy }) {
           );
         })}
       </div>
-      {tooltip ? <FloatingTooltip {...tooltip} /> : null}
     </div>
   );
 }
@@ -1418,7 +1435,7 @@ async function appInvoke<T>(command: string, args?: Record<string, unknown>): Pr
 
 function demoResponse(command: string, args?: Record<string, unknown>) {
   if (command === "get_dashboard") return demoDashboard(args?.range as RangePayload | undefined);
-  if (command === "get_app_version") return "0.1.1";
+  if (command === "get_app_version") return "0.1.2";
   if (command === "get_startup_enabled") return false;
   if (command === "set_startup_enabled") return Boolean(args?.enabled);
   if (command === "get_close_to_tray") return true;
