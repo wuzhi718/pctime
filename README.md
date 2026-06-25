@@ -39,12 +39,12 @@ Implemented:
 - light and dark themes
 - English and Simplified Chinese UI
 - startup-at-login toggle on Windows
+- close-to-tray mode with a Windows tray restore shortcut
 
 Planned:
 
 - editable category rules
 - browser extension for exact URL and domain classification
-- tray mode
 - packaged release workflow
 - ActivityWatch import
 - macOS and Linux collectors
@@ -84,7 +84,7 @@ The app is intentionally simple:
 
 - **Overview**: high-level metrics, time trend, category donut, top app ranking, app share chart.
 - **Analysis**: category and application details for the selected time range.
-- **Settings**: language, theme, startup, storage path, storage size, and performance notes.
+- **Settings**: language, theme, startup, close behavior, storage path, storage size, and performance notes.
 
 Supported time filters:
 

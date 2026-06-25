@@ -15,11 +15,15 @@ use std::sync::{
 use std::thread;
 use std::time::Duration;
 
+use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::Manager;
+use tauri::WindowEvent;
 
 pub struct AppState {
     pub db_path: PathBuf,
+    pub settings_path: PathBuf,
     pub storage_location: String,
+    pub close_to_tray: Arc<AtomicBool>,
     pub monitoring: Arc<AtomicBool>,
 }
 
@@ -37,8 +41,19 @@ fn start_monitor(db_path: PathBuf, monitoring: Arc<AtomicBool>) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                let state = window.state::<AppState>();
+
+                if state.close_to_tray.load(Ordering::Relaxed) {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(|app| {
             let fallback_dir = app.path().app_data_dir()?;
+            let settings_path = fallback_dir.join("settings.json");
             let install_data_dir = env::current_exe()
                 .ok()
                 .and_then(|path| path.parent().map(|parent| parent.join("pctime-data")))
@@ -46,13 +61,35 @@ pub fn run() {
             let (db_path, storage_location) =
                 storage::init_database(&install_data_dir, &fallback_dir)?;
             let _ = storage::refresh_unclassified_categories(&db_path);
+            let close_to_tray = Arc::new(AtomicBool::new(commands::load_close_to_tray(
+                &settings_path,
+            )));
             let monitoring = Arc::new(AtomicBool::new(true));
 
             start_monitor(db_path.clone(), Arc::clone(&monitoring));
 
+            if let Some(icon) = app.default_window_icon().cloned() {
+                let _ = TrayIconBuilder::new()
+                    .icon(icon)
+                    .tooltip("PCTime")
+                    .show_menu_on_left_click(false)
+                    .on_tray_icon_event(|tray, event| match event {
+                        TrayIconEvent::Click { .. } | TrayIconEvent::DoubleClick { .. } => {
+                            if let Some(window) = tray.app_handle().get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        _ => {}
+                    })
+                    .build(app);
+            }
+
             app.manage(AppState {
                 db_path,
+                settings_path,
                 storage_location,
+                close_to_tray,
                 monitoring,
             });
 
@@ -63,6 +100,8 @@ pub fn run() {
             commands::record_now,
             commands::list_live_windows,
             commands::set_monitoring,
+            commands::get_close_to_tray,
+            commands::set_close_to_tray,
             commands::get_startup_enabled,
             commands::set_startup_enabled
         ])

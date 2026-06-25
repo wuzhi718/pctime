@@ -39,6 +39,8 @@ type TimelineApp = { app_name: string; category: string; seconds: number };
 type TimelinePoint = { hour: string; active_seconds: number; idle_seconds: number; top_apps: TimelineApp[] };
 type LiveWindow = { app_name: string; window_title: string; category: string; visible_area: number; visible_share: number; focused: boolean };
 type DonutSegment = { key: string; label: string; valueLabel: string; shareLabel: string; color: string; share: number };
+type TooltipLine = { color?: string; label: string; value: string };
+type FloatingTooltipData = { color?: string; lines?: TooltipLine[]; primary: string; secondary?: string; title: string; x: number; y: number };
 type CaptureHealth = {
   monitoring: boolean;
   database_path: string;
@@ -143,6 +145,8 @@ const copy = {
       light: "白色",
       startup: "开机自启动",
       startupHint: "登录 Windows 后自动启动 PCTime。",
+      closeToTray: "关闭按钮放到后台",
+      closeToTrayHint: "开启后点击关闭会隐藏到 Windows 托盘，点击托盘图标可恢复；关闭后点击关闭会直接退出程序。",
       screenOff: "电脑只是息屏但没有睡眠时，PCTime 仍会运行；超过空闲阈值后统计为离开时间。电脑睡眠/休眠时不会采样，也不会把睡眠时长算进任何应用。",
       performanceNote: "默认每秒采样一次，只写入很小的 SQLite 文本记录；正常桌面使用时 CPU 占用应非常低。",
       storageNote: "数据库优先放在软件安装目录的 pctime-data 文件夹，写入失败才回退到用户 AppData。",
@@ -248,6 +252,8 @@ const copy = {
       light: "Light",
       startup: "Start at login",
       startupHint: "Launch PCTime automatically after signing in to Windows.",
+      closeToTray: "Close to background",
+      closeToTrayHint: "When enabled, the close button hides PCTime to the Windows tray. Turn it off to exit the app when closing.",
       screenOff: "If the display turns off but the PC stays awake, PCTime keeps running; after the idle threshold it is recorded as idle time. During sleep or hibernation, sampling stops and the sleep gap is not counted for any app.",
       performanceNote: "The collector samples once per second and writes small SQLite text rows, so CPU use should stay very low in normal desktop work.",
       storageNote: "The database is stored in a pctime-data folder next to the app when possible, then falls back to user AppData if that location is not writable.",
@@ -330,6 +336,7 @@ function App() {
   const [customStart, setCustomStart] = useState(() => toLocalInput(startOfToday()));
   const [customEnd, setCustomEnd] = useState(() => toLocalInput(new Date()));
   const [startupEnabled, setStartupEnabled] = useState<boolean | null>(null);
+  const [closeToTray, setCloseToTray] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -375,6 +382,12 @@ function App() {
       .catch(() => setStartupEnabled(false));
   }, []);
 
+  useEffect(() => {
+    void appInvoke<boolean>("get_close_to_tray")
+      .then(setCloseToTray)
+      .catch(() => setCloseToTray(true));
+  }, []);
+
   const filteredApps = useMemo(() => {
     const value = query.trim().toLowerCase();
     if (!dashboard || !value) return dashboard?.apps ?? [];
@@ -399,6 +412,17 @@ function App() {
       setStartupEnabled(actual);
     } catch (caught) {
       setStartupEnabled(!enabled);
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
+  async function changeCloseToTray(enabled: boolean) {
+    setCloseToTray(enabled);
+    try {
+      const actual = await appInvoke<boolean>("set_close_to_tray", { enabled });
+      setCloseToTray(actual);
+    } catch (caught) {
+      setCloseToTray(!enabled);
       setError(caught instanceof Error ? caught.message : String(caught));
     }
   }
@@ -489,10 +513,12 @@ function App() {
           {dashboard ? (
             <ActivePage
               dashboard={dashboard}
+              closeToTray={closeToTray}
               filteredApps={filteredApps}
               locale={locale}
               query={query}
               setLocale={setLocale}
+              setCloseToTray={changeCloseToTray}
               setQuery={setQuery}
               setStartupEnabled={changeStartup}
               setTheme={setTheme}
@@ -512,10 +538,12 @@ function App() {
 
 function ActivePage({
   dashboard,
+  closeToTray,
   filteredApps,
   locale,
   query,
   setLocale,
+  setCloseToTray,
   setQuery,
   setStartupEnabled,
   setTheme,
@@ -525,10 +553,12 @@ function ActivePage({
   view,
 }: {
   dashboard: Dashboard;
+  closeToTray: boolean | null;
   filteredApps: AppSummary[];
   locale: Locale;
   query: string;
   setLocale: (value: Locale) => void;
+  setCloseToTray: (enabled: boolean) => void;
   setQuery: (value: string) => void;
   setStartupEnabled: (enabled: boolean) => void;
   setTheme: (value: Theme) => void;
@@ -576,6 +606,13 @@ function ActivePage({
               label={t.settings.startup}
               note={t.settings.startupHint}
               onChange={setStartupEnabled}
+            />
+            <SwitchRow
+              checked={Boolean(closeToTray)}
+              disabled={closeToTray === null}
+              label={t.settings.closeToTray}
+              note={t.settings.closeToTrayHint}
+              onChange={setCloseToTray}
             />
             <InfoNote icon={<Power size={18} />} text={t.settings.screenOff} />
           </div>
@@ -873,6 +910,7 @@ function RingDonut({ centerLabel, centerValue, compact = false, segments }: { ce
               strokeDasharray={`${dash} ${circumference - dash}`}
               strokeDashoffset={offset}
               strokeWidth={stroke}
+              style={{ "--segment-color": segment.color } as CSSProperties}
               tabIndex={0}
               transform="rotate(-90 60 60)"
               aria-label={`${segment.label}: ${segment.valueLabel}, ${segment.shareLabel}`}
@@ -883,7 +921,6 @@ function RingDonut({ centerLabel, centerValue, compact = false, segments }: { ce
                 setTooltip({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
               }}
             >
-              <title>{`${segment.label}: ${segment.valueLabel}, ${segment.shareLabel}`}</title>
             </circle>
           );
         })}
@@ -893,27 +930,28 @@ function RingDonut({ centerLabel, centerValue, compact = false, segments }: { ce
         <span>{centerLabel}</span>
       </div>
       {active ? (
-        <div
-          className="chart-tooltip-floating"
-          style={{ left: tooltip.x + 14, top: tooltip.y - 12 } as CSSProperties}
-        >
-          <strong>{active.label}</strong>
-          <span>{active.valueLabel}</span>
-          <em>{active.shareLabel}</em>
-        </div>
+        <FloatingTooltip
+          color={active.color}
+          primary={active.valueLabel}
+          secondary={active.shareLabel}
+          title={active.label}
+          x={tooltip.x}
+          y={tooltip.y}
+        />
       ) : null}
     </div>
   );
 }
 
 function Timeline({ points, t }: { points: TimelinePoint[]; t: UiCopy }) {
+  const [tooltip, setTooltip] = useState<FloatingTooltipData | null>(null);
   if (!points.length) return <EmptyState label="No timeline" />;
   const maxSeconds = Math.max(...points.map((point) => point.active_seconds + point.idle_seconds), 1);
   const style = { "--timeline-count": points.length } as CSSProperties;
 
   const pointLabel = (point: TimelinePoint) => {
     const apps = point.top_apps
-      .map((app) => `${app.app_name} - ${categoryLabel(app.category, t)} - ${formatDuration(app.seconds)} - ${point.active_seconds > 0 ? formatPercent(app.seconds / point.active_seconds) : "0%"}`)
+      .map((app) => `${app.app_name} - ${categoryLabel(app.category, t)} - ${formatDuration(app.seconds)} - ${point.active_seconds > 0 ? formatPercent(Math.min(app.seconds / point.active_seconds, 1)) : "0%"}`)
       .join("; ");
     return `${point.hour}. ${t.table.visible}: ${formatDuration(point.active_seconds)}${point.idle_seconds > 0 ? `. ${t.cards["Idle time"][0]}: ${formatDuration(point.idle_seconds)}` : ""}${apps ? `. Top apps: ${apps}` : ""}`;
   };
@@ -928,33 +966,71 @@ function Timeline({ points, t }: { points: TimelinePoint[]; t: UiCopy }) {
             <div
               className="timeline-column"
               key={point.hour}
-              title={`${point.hour} ${formatDuration(point.active_seconds)}`}
               aria-label={pointLabel(point)}
               data-active={point.active_seconds}
+              onPointerLeave={() => setTooltip(null)}
+              onPointerMove={(event) => {
+                setTooltip({
+                  title: point.hour,
+                  primary: `${t.table.visible}: ${formatDuration(point.active_seconds)}`,
+                  secondary: point.idle_seconds > 0 ? `${t.cards["Idle time"][0]}: ${formatDuration(point.idle_seconds)}` : undefined,
+                  x: event.clientX,
+                  y: event.clientY,
+                  lines: point.top_apps.map((app) => ({
+                    color: categoryColor(app.category),
+                    label: app.app_name,
+                    value: `${categoryLabel(app.category, t)} - ${formatDuration(app.seconds)} - ${point.active_seconds > 0 ? formatPercent(Math.min(app.seconds / point.active_seconds, 1)) : "0%"}`,
+                  })),
+                });
+              }}
             >
               <div className="timeline-bars">
                 <span className="timeline-idle" style={{ height: `${idleHeight}%` }} />
                 <span className="timeline-active" style={{ height: `${activeHeight}%` }} />
-              </div>
-              <div className="timeline-tooltip">
-                <strong>{point.hour}</strong>
-                <span>{t.table.visible}: {formatDuration(point.active_seconds)}</span>
-                {point.idle_seconds > 0 ? <span>{t.cards["Idle time"][0]}: {formatDuration(point.idle_seconds)}</span> : null}
-                {point.top_apps.length ? (
-                  <div>
-                    {point.top_apps.map((app) => (
-                      <em key={`${point.hour}-${app.app_name}-${app.category}`}>
-                        {app.app_name} - {categoryLabel(app.category, t)} - {formatDuration(app.seconds)} - {point.active_seconds > 0 ? formatPercent(app.seconds / point.active_seconds) : "0%"}
-                      </em>
-                    ))}
-                  </div>
-                ) : null}
               </div>
               <small>{point.hour}</small>
             </div>
           );
         })}
       </div>
+      {tooltip ? <FloatingTooltip {...tooltip} /> : null}
+    </div>
+  );
+}
+
+function FloatingTooltip({ color, lines = [], primary, secondary, title, x, y }: FloatingTooltipData) {
+  const targetWidth = Math.min(lines.length ? 330 : 240, window.innerWidth - 24);
+  const placeRight = x + 18 + targetWidth < window.innerWidth;
+  const left = placeRight ? x + 16 : Math.max(12, x - targetWidth - 16);
+  const top = Math.max(12, Math.min(y - 18, window.innerHeight - 188));
+  const style = {
+    "--tooltip-anchor": placeRight ? "left" : "right",
+    "--tooltip-x": `${left}px`,
+    "--tooltip-y": `${top}px`,
+    "--tooltip-color": color ?? "var(--accent)",
+  } as CSSProperties;
+
+  return (
+    <div className="chart-tooltip-floating" data-anchor={placeRight ? "left" : "right"} style={style}>
+      <div className="tooltip-title">
+        <span />
+        <strong>{title}</strong>
+      </div>
+      <div className="tooltip-values">
+        <span>{primary}</span>
+        {secondary ? <em>{secondary}</em> : null}
+      </div>
+      {lines.length ? (
+        <div className="tooltip-lines">
+          {lines.map((line) => (
+            <div key={`${line.label}-${line.value}`}>
+              <span style={{ "--line-color": line.color ?? "var(--tooltip-color)" } as CSSProperties} />
+              <strong>{line.label}</strong>
+              <em>{line.value}</em>
+            </div>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1130,6 +1206,8 @@ function demoResponse(command: string, args?: Record<string, unknown>) {
   if (command === "get_dashboard") return demoDashboard(args?.range as RangePayload | undefined);
   if (command === "get_startup_enabled") return false;
   if (command === "set_startup_enabled") return Boolean(args?.enabled);
+  if (command === "get_close_to_tray") return true;
+  if (command === "set_close_to_tray") return Boolean(args?.enabled);
   return { captured_at: Date.now(), windows_recorded: 3, idle: false, idle_seconds: 0 };
 }
 

@@ -1,9 +1,16 @@
+use std::fs;
+use std::path::Path;
 use std::sync::atomic::Ordering;
 
 use tauri::State;
 
 use crate::models::{CaptureStats, Dashboard, LiveWindow, RangeQuery};
 use crate::{sampler, storage, AppState};
+
+#[derive(Default, serde::Deserialize, serde::Serialize)]
+struct UserSettings {
+    close_to_tray: Option<bool>,
+}
 
 #[tauri::command]
 pub fn get_dashboard(
@@ -37,6 +44,18 @@ pub fn set_monitoring(state: State<'_, AppState>, enabled: bool) -> Result<bool,
 }
 
 #[tauri::command]
+pub fn get_close_to_tray(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(state.close_to_tray.load(Ordering::Relaxed))
+}
+
+#[tauri::command]
+pub fn set_close_to_tray(state: State<'_, AppState>, enabled: bool) -> Result<bool, String> {
+    state.close_to_tray.store(enabled, Ordering::Relaxed);
+    save_close_to_tray(&state.settings_path, enabled)?;
+    Ok(enabled)
+}
+
+#[tauri::command]
 pub fn get_startup_enabled() -> Result<bool, String> {
     startup_enabled()
 }
@@ -45,6 +64,30 @@ pub fn get_startup_enabled() -> Result<bool, String> {
 pub fn set_startup_enabled(enabled: bool) -> Result<bool, String> {
     set_startup(enabled)?;
     startup_enabled()
+}
+
+pub fn load_close_to_tray(settings_path: &Path) -> bool {
+    fs::read_to_string(settings_path)
+        .ok()
+        .and_then(|contents| serde_json::from_str::<UserSettings>(&contents).ok())
+        .and_then(|settings| settings.close_to_tray)
+        .unwrap_or(true)
+}
+
+fn save_close_to_tray(settings_path: &Path, enabled: bool) -> Result<(), String> {
+    if let Some(parent) = settings_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+
+    let mut settings = fs::read_to_string(settings_path)
+        .ok()
+        .and_then(|contents| serde_json::from_str::<UserSettings>(&contents).ok())
+        .unwrap_or_default();
+
+    settings.close_to_tray = Some(enabled);
+
+    let contents = serde_json::to_string_pretty(&settings).map_err(|error| error.to_string())?;
+    fs::write(settings_path, contents).map_err(|error| error.to_string())
 }
 
 #[cfg(windows)]
@@ -59,7 +102,9 @@ fn startup_enabled() -> Result<bool, String> {
     use winreg::RegKey;
 
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let key = hkcu.open_subkey(RUN_KEY).map_err(|error| error.to_string())?;
+    let key = hkcu
+        .open_subkey(RUN_KEY)
+        .map_err(|error| error.to_string())?;
     let command = key
         .get_value::<String, _>(STARTUP_VALUE_NAME)
         .unwrap_or_default();

@@ -41,7 +41,7 @@ SQLite schema, inserts, migrations, and dashboard aggregation queries. It also r
 
 `src-tauri/src/commands.rs`
 
-Tauri commands called by the React frontend for dashboard data, settings data, and startup-at-login configuration.
+Tauri commands called by the React frontend for dashboard data, settings data, startup-at-login, and close-to-tray configuration.
 
 `src-tauri/src/models.rs`
 
@@ -119,7 +119,7 @@ The React app has three main surfaces:
 
 - `Overview`: visual dashboard with metrics, time trend, category donut, application ranking, and app share chart.
 - `Analysis`: detailed category and app breakdowns for deeper inspection.
-- `Settings`: language, theme, startup, data location, and lightweight performance/storage information.
+- `Settings`: language, theme, startup, close behavior, data location, and lightweight performance/storage information.
 
 The UI stores language, theme, selected range, custom dates, and sidebar state in local storage.
 
@@ -141,7 +141,6 @@ Good next architecture steps:
 
 - user-editable rules stored in SQLite
 - browser extension metadata bridge
-- tray process that keeps sampling when the dashboard is closed
 - import pipeline for ActivityWatch events
 - platform-specific collectors for macOS and Linux
 - optional local suggestions for unknown apps
