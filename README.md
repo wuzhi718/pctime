@@ -6,6 +6,10 @@ Visible-window desktop time tracking for split-screen work.
 
 PCTime is a local-first desktop time tracker that measures what is actually visible on your screen, not only the foreground window. It is designed for modern desktop workflows: code on one side, ChatGPT or docs on the other, a game or video partly visible, and multiple windows tiled across one monitor.
 
+## Screenshot
+
+![PCTime overview dashboard](docs/assets/overview-en.png)
+
 ## Why It Exists
 
 Most desktop time trackers assign time to the focused or foreground window. That is useful, but it misses a common reality: people often keep several windows visible at the same time.
