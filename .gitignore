@@ -1,0 +1,10 @@
+node_modules/
+dist/
+target/
+src-tauri/target/
+src-tauri/gen/
+*.log
+*.sqlite
+*.sqlite3
+pctime-data/
+.DS_Store
