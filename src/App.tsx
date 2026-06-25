@@ -4,6 +4,8 @@ import {
   CalendarDays,
   Clock,
   Database,
+  Download,
+  ExternalLink,
   Gauge,
   HardDrive,
   Languages,
@@ -22,6 +24,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type CSSProperties, type MouseEvent, type PointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import "./App.css";
 
 type ViewId = "overview" | "activity" | "settings";
@@ -41,6 +44,18 @@ type LiveWindow = { app_name: string; window_title: string; category: string; vi
 type DonutSegment = { key: string; label: string; valueLabel: string; shareLabel: string; color: string; share: number };
 type TooltipLine = { color?: string; label: string; value: string };
 type FloatingTooltipData = { color?: string; lines?: TooltipLine[]; primary: string; secondary?: string; title: string; x: number; y: number };
+type GitHubReleaseAsset = { browser_download_url: string; name: string };
+type GitHubRelease = { assets: GitHubReleaseAsset[]; body?: string; html_url: string; tag_name: string };
+type UpdateState = {
+  assetName: string | null;
+  assetUrl: string | null;
+  available: boolean | null;
+  checkedAt: string | null;
+  checking: boolean;
+  error: string | null;
+  latestVersion: string | null;
+  releaseUrl: string | null;
+};
 type CaptureHealth = {
   monitoring: boolean;
   database_path: string;
@@ -89,6 +104,7 @@ const copy = {
       topApps: "高频应用",
       appearance: "外观",
       startup: "系统",
+      updates: "软件更新",
       storage: "存储与性能",
     },
     table: {
@@ -151,6 +167,22 @@ const copy = {
       performanceNote: "默认每秒采样一次，只写入很小的 SQLite 文本记录；正常桌面使用时 CPU 占用应非常低。",
       storageNote: "数据库优先放在软件安装目录的 pctime-data 文件夹，写入失败才回退到用户 AppData。",
     },
+    updates: {
+      autoNote: "PCTime 会每天自动检查一次 GitHub Releases，不需要自建服务器，也不会影响本地采集。",
+      available: "发现新版本",
+      availableNote: "GitHub Release 上有新版本，可以下载 Windows 安装包。",
+      checkNow: "检查更新",
+      checkedAt: "上次检查",
+      checking: "检查中",
+      current: "已是最新版本",
+      currentNote: "当前版本已经是 GitHub Release 上的最新版本。",
+      currentVersion: "当前版本",
+      downloadWindows: "下载 Windows x64",
+      failed: "检查失败",
+      latestVersion: "最新版本",
+      openRelease: "打开 Release",
+      unknown: "未知",
+    },
     status: {
       database: "数据库",
       generated: "更新时间",
@@ -196,6 +228,7 @@ const copy = {
       topApps: "Top apps",
       appearance: "Appearance",
       startup: "System",
+      updates: "Software updates",
       storage: "Storage and performance",
     },
     table: {
@@ -258,6 +291,22 @@ const copy = {
       performanceNote: "The collector samples once per second and writes small SQLite text rows, so CPU use should stay very low in normal desktop work.",
       storageNote: "The database is stored in a pctime-data folder next to the app when possible, then falls back to user AppData if that location is not writable.",
     },
+    updates: {
+      autoNote: "PCTime checks GitHub Releases once per day. No custom server is required, and failed checks never affect local tracking.",
+      available: "Update available",
+      availableNote: "A newer GitHub Release is available. Download the Windows installer when you are ready.",
+      checkNow: "Check for updates",
+      checkedAt: "Last checked",
+      checking: "Checking",
+      current: "Up to date",
+      currentNote: "This version matches the latest GitHub Release.",
+      currentVersion: "Current version",
+      downloadWindows: "Download Windows x64",
+      failed: "Check failed",
+      latestVersion: "Latest version",
+      openRelease: "Open Release",
+      unknown: "Unknown",
+    },
     status: {
       database: "Database",
       generated: "Updated",
@@ -287,6 +336,20 @@ const copy = {
 } as const;
 
 type UiCopy = (typeof copy)[Locale];
+
+const UPDATE_ENDPOINT = "https://api.github.com/repos/wuzhi718/pctime/releases/latest";
+const UPDATE_CHECK_KEY = "pctime-last-update-check";
+const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1_000;
+const emptyUpdateState: UpdateState = {
+  assetName: null,
+  assetUrl: null,
+  available: null,
+  checkedAt: null,
+  checking: false,
+  error: null,
+  latestVersion: null,
+  releaseUrl: null,
+};
 
 const cardIcons: Record<string, LucideIcon> = {
   "Visible time": Activity,
@@ -335,8 +398,10 @@ function App() {
   const [rangePreset, setRangePreset] = useState<RangePreset>(() => readStorage("pctime-range", "day"));
   const [customStart, setCustomStart] = useState(() => toLocalInput(startOfToday()));
   const [customEnd, setCustomEnd] = useState(() => toLocalInput(new Date()));
+  const [appVersion, setAppVersion] = useState("0.1.1");
   const [startupEnabled, setStartupEnabled] = useState<boolean | null>(null);
   const [closeToTray, setCloseToTray] = useState<boolean | null>(null);
+  const [updateState, setUpdateState] = useState<UpdateState>(emptyUpdateState);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -365,11 +430,44 @@ function App() {
     }
   }, [range]);
 
+  const checkForUpdates = useCallback(async (silent = false) => {
+    setUpdateState((current) => ({ ...current, checking: true, error: null }));
+
+    try {
+      const latest = await fetchLatestRelease(appVersion);
+      const checkedAt = new Date().toISOString();
+      const next = { ...latest, checkedAt, checking: false, error: null };
+      setUpdateState(next);
+      localStorage.setItem(UPDATE_CHECK_KEY, String(Date.now()));
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught);
+      setUpdateState((current) => ({
+        ...current,
+        available: silent ? current.available : null,
+        checkedAt: new Date().toISOString(),
+        checking: false,
+        error: message,
+      }));
+    }
+  }, [appVersion]);
+
   useEffect(() => {
     void loadDashboard();
     const timer = window.setInterval(() => void loadDashboard(), 5_000);
     return () => window.clearInterval(timer);
   }, [loadDashboard]);
+
+  useEffect(() => {
+    void appInvoke<string>("get_app_version")
+      .then(setAppVersion)
+      .catch(() => setAppVersion("0.1.1"));
+  }, []);
+
+  useEffect(() => {
+    const lastCheck = Number(localStorage.getItem(UPDATE_CHECK_KEY) ?? "0");
+    if (Date.now() - lastCheck < UPDATE_CHECK_INTERVAL_MS) return;
+    void checkForUpdates(true);
+  }, [checkForUpdates]);
 
   useEffect(() => localStorage.setItem("pctime-locale", locale), [locale]);
   useEffect(() => localStorage.setItem("pctime-theme", theme), [theme]);
@@ -516,6 +614,7 @@ function App() {
               closeToTray={closeToTray}
               filteredApps={filteredApps}
               locale={locale}
+              appVersion={appVersion}
               query={query}
               setLocale={setLocale}
               setCloseToTray={changeCloseToTray}
@@ -525,6 +624,8 @@ function App() {
               startupEnabled={startupEnabled}
               t={t}
               theme={theme}
+              updateState={updateState}
+              checkForUpdates={checkForUpdates}
               view={view}
             />
           ) : (
@@ -537,6 +638,8 @@ function App() {
 }
 
 function ActivePage({
+  appVersion,
+  checkForUpdates,
   dashboard,
   closeToTray,
   filteredApps,
@@ -550,8 +653,11 @@ function ActivePage({
   startupEnabled,
   t,
   theme,
+  updateState,
   view,
 }: {
+  appVersion: string;
+  checkForUpdates: (silent?: boolean) => Promise<void>;
   dashboard: Dashboard;
   closeToTray: boolean | null;
   filteredApps: AppSummary[];
@@ -565,6 +671,7 @@ function ActivePage({
   startupEnabled: boolean | null;
   t: UiCopy;
   theme: Theme;
+  updateState: UpdateState;
   view: ViewId;
 }) {
   if (view === "activity") {
@@ -616,6 +723,10 @@ function ActivePage({
             />
             <InfoNote icon={<Power size={18} />} text={t.settings.screenOff} />
           </div>
+        </Panel>
+
+        <Panel title={t.panels.updates} action={<RefreshCcw size={18} />}>
+          <UpdatePanel appVersion={appVersion} onCheck={checkForUpdates} t={t} updateState={updateState} />
         </Panel>
 
         <Panel title={t.panels.storage} action={<HardDrive size={18} />}>
@@ -1144,6 +1255,59 @@ function InfoNote({ icon, text }: { icon: React.ReactNode; text: string }) {
   return <div className="info-note">{icon}<span>{text}</span></div>;
 }
 
+function UpdatePanel({ appVersion, onCheck, t, updateState }: { appVersion: string; onCheck: (silent?: boolean) => Promise<void>; t: UiCopy; updateState: UpdateState }) {
+  const statusText = updateState.checking
+    ? t.updates.checking
+    : updateState.error
+      ? t.updates.failed
+      : updateState.available
+        ? t.updates.available
+        : updateState.available === false
+          ? t.updates.current
+          : t.updates.unknown;
+  const note = updateState.error
+    ? updateState.error
+    : updateState.available
+      ? t.updates.availableNote
+      : updateState.available === false
+        ? t.updates.currentNote
+        : t.updates.autoNote;
+
+  return (
+    <div className="settings-stack">
+      <div className={updateState.available ? "update-card available" : "update-card"}>
+        <div className="update-version-grid">
+          <InfoItem label={t.updates.currentVersion} value={`v${appVersion}`} />
+          <InfoItem label={t.updates.latestVersion} value={updateState.latestVersion ? `v${updateState.latestVersion}` : t.updates.unknown} />
+          <InfoItem label={t.updates.checkedAt} value={updateState.checkedAt ? formatDateTime(updateState.checkedAt) : t.updates.unknown} />
+        </div>
+        <div className="update-status">
+          <strong>{statusText}</strong>
+          <span>{note}</span>
+        </div>
+        <div className="update-actions">
+          <button className="secondary-button" disabled={updateState.checking} type="button" onClick={() => void onCheck(false)}>
+            <RefreshCcw className={updateState.checking ? "spin" : undefined} size={16} />
+            {updateState.checking ? t.updates.checking : t.updates.checkNow}
+          </button>
+          {updateState.assetUrl ? (
+            <button className="primary-button" type="button" onClick={() => void openExternal(updateState.assetUrl!)}>
+              <Download size={16} />
+              {t.updates.downloadWindows}
+            </button>
+          ) : null}
+          {updateState.releaseUrl ? (
+            <button className="secondary-button" type="button" onClick={() => void openExternal(updateState.releaseUrl!)}>
+              <ExternalLink size={16} />
+              {t.updates.openRelease}
+            </button>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SwitchRow({ checked, disabled, label, note, onChange }: { checked: boolean; disabled?: boolean; label: string; note: string; onChange: (checked: boolean) => void }) {
   return (
     <label className={disabled ? "switch-row disabled" : "switch-row"}>
@@ -1196,6 +1360,56 @@ function storageLocationLabel(location: string, t: UiCopy) {
   return location === "install_dir" ? t.status.installDir : t.status.fallbackDir;
 }
 
+async function fetchLatestRelease(currentVersion: string): Promise<Omit<UpdateState, "checkedAt" | "checking" | "error">> {
+  const response = await fetch(UPDATE_ENDPOINT, {
+    headers: { Accept: "application/vnd.github+json" },
+  });
+
+  if (!response.ok) {
+    throw new Error(`GitHub update check failed: ${response.status}`);
+  }
+
+  const release = await response.json() as GitHubRelease;
+  const latestVersion = normalizeVersion(release.tag_name);
+  const asset = release.assets.find((item) => /windows.*x64.*\.msi$/i.test(item.name))
+    ?? release.assets.find((item) => /\.msi$/i.test(item.name))
+    ?? null;
+
+  return {
+    assetName: asset?.name ?? null,
+    assetUrl: asset?.browser_download_url ?? null,
+    available: compareVersions(latestVersion, normalizeVersion(currentVersion)) > 0,
+    latestVersion,
+    releaseUrl: release.html_url,
+  };
+}
+
+function normalizeVersion(version: string) {
+  return version.trim().replace(/^v/i, "").split("-")[0];
+}
+
+function compareVersions(left: string, right: string) {
+  const leftParts = left.split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const rightParts = right.split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const length = Math.max(leftParts.length, rightParts.length);
+
+  for (let index = 0; index < length; index += 1) {
+    const diff = (leftParts[index] ?? 0) - (rightParts[index] ?? 0);
+    if (diff !== 0) return diff;
+  }
+
+  return 0;
+}
+
+async function openExternal(url: string) {
+  const hasTauri = Boolean((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
+  if (hasTauri) {
+    await openUrl(url);
+  } else {
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+}
+
 async function appInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   const hasTauri = Boolean((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
   if (hasTauri) return invoke<T>(command, args);
@@ -1204,6 +1418,7 @@ async function appInvoke<T>(command: string, args?: Record<string, unknown>): Pr
 
 function demoResponse(command: string, args?: Record<string, unknown>) {
   if (command === "get_dashboard") return demoDashboard(args?.range as RangePayload | undefined);
+  if (command === "get_app_version") return "0.1.1";
   if (command === "get_startup_enabled") return false;
   if (command === "set_startup_enabled") return Boolean(args?.enabled);
   if (command === "get_close_to_tray") return true;
@@ -1311,6 +1526,12 @@ function formatBytes(bytes: number) {
   const units = ["B", "KB", "MB", "GB"];
   const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
   return `${(bytes / 1024 ** index).toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+}
+
+function formatDateTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return `${date.toLocaleDateString()} ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
 }
 
 export default App;

@@ -426,7 +426,7 @@ p {
   grid-template-rows: minmax(220px, auto) minmax(0, 1fr);
 }
 
-.settings-page .panel:nth-child(3) {
+.settings-page .panel:nth-child(4) {
   grid-column: 1 / -1;
 }
 
@@ -1259,7 +1259,8 @@ tbody tr:hover {
 .setting-block,
 .info-item,
 .info-note,
-.switch-row {
+.switch-row,
+.update-card {
   min-width: 0;
   padding: 12px;
   border-radius: 8px;
@@ -1301,6 +1302,90 @@ tbody tr:hover {
   color: var(--text-muted);
   font-size: 13px;
   line-height: 1.45;
+}
+
+.update-card {
+  display: grid;
+  gap: 12px;
+}
+
+.update-card.available {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--accent) 8%, transparent), transparent 46%),
+    var(--panel-soft);
+}
+
+.update-version-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.update-status {
+  display: grid;
+  gap: 4px;
+}
+
+.update-status strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.update-status span {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.primary-button,
+.secondary-button {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 11px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 780;
+  transition: transform 160ms ease, color 160ms ease, background 160ms ease, border-color 160ms ease;
+}
+
+.primary-button {
+  color: #ffffff;
+  background: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 82%, white);
+}
+
+.secondary-button {
+  color: var(--text-muted);
+  background: var(--panel);
+  border: 1px solid var(--line);
+}
+
+.primary-button:hover,
+.secondary-button:hover {
+  transform: translateY(-1px);
+}
+
+.secondary-button:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
+}
+
+.primary-button:disabled,
+.secondary-button:disabled {
+  cursor: wait;
+  opacity: 0.68;
+  transform: none;
 }
 
 .switch-row {
@@ -1510,12 +1595,16 @@ tbody tr:hover {
     grid-template-rows: auto minmax(210px, 1fr) minmax(210px, 1fr) minmax(230px, 1fr);
   }
 
-  .settings-page .panel:nth-child(3) {
+  .settings-page .panel:nth-child(4) {
     grid-column: auto;
   }
 
   .settings-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .update-version-grid {
+    grid-template-columns: 1fr;
   }
 }
 

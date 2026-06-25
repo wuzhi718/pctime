@@ -44,12 +44,13 @@ Implemented:
 - English and Simplified Chinese UI
 - startup-at-login toggle on Windows
 - close-to-tray mode with a Windows tray restore shortcut
+- GitHub Releases update checks without a custom server
 
 Planned:
 
 - editable category rules
 - browser extension for exact URL and domain classification
-- packaged release workflow
+- signed automatic installation of updates
 - ActivityWatch import
 - macOS and Linux collectors
 - optional local suggestions for unknown apps
@@ -102,6 +103,8 @@ Supported time filters:
 
 PCTime is local-first. The core tracker does not require an account or network connection.
 
+The optional update checker uses the public GitHub Releases API to detect new versions. It does not need a custom server, account, telemetry backend, or hosted update service.
+
 Default database location:
 
 ```text
@@ -109,6 +112,12 @@ pctime-data/pctime.sqlite3
 ```
 
 The app first tries to store the database next to the executable. If that location is read-only, it falls back to the user app data directory and shows the actual path in Settings.
+
+## Updates
+
+PCTime checks GitHub Releases for a newer version at most once per day and also lets you check manually from Settings. When a newer release is available, the app shows the latest version and links to the Windows installer asset.
+
+This is intentionally a lightweight open-source update flow: no private server is required, and updates are downloaded from the project's GitHub release page.
 
 ## Performance
 

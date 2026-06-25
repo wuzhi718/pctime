@@ -100,6 +100,7 @@ pub fn run() {
             commands::record_now,
             commands::list_live_windows,
             commands::set_monitoring,
+            commands::get_app_version,
             commands::get_close_to_tray,
             commands::set_close_to_tray,
             commands::get_startup_enabled,

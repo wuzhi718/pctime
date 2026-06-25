@@ -41,7 +41,7 @@ SQLite schema, inserts, migrations, and dashboard aggregation queries. It also r
 
 `src-tauri/src/commands.rs`
 
-Tauri commands called by the React frontend for dashboard data, settings data, startup-at-login, and close-to-tray configuration.
+Tauri commands called by the React frontend for dashboard data, settings data, app version, startup-at-login, and close-to-tray configuration.
 
 `src-tauri/src/models.rs`
 
@@ -119,9 +119,15 @@ The React app has three main surfaces:
 
 - `Overview`: visual dashboard with metrics, time trend, category donut, application ranking, and app share chart.
 - `Analysis`: detailed category and app breakdowns for deeper inspection.
-- `Settings`: language, theme, startup, close behavior, data location, and lightweight performance/storage information.
+- `Settings`: language, theme, software updates, startup, close behavior, data location, and lightweight performance/storage information.
 
 The UI stores language, theme, selected range, custom dates, and sidebar state in local storage.
+
+## Updates
+
+The app uses a lightweight GitHub Releases check instead of a hosted update server. The frontend reads the app version from a Tauri command, fetches the latest public release from GitHub, compares semantic versions, and links to the matching Windows x64 MSI asset when a newer version exists.
+
+Automatic checking is rate-limited in local storage to roughly once per day. Manual checking remains available from Settings. This is detection and download guidance, not a signed silent installer.
 
 ## Internationalization
 

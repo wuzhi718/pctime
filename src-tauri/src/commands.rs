@@ -44,6 +44,11 @@ pub fn set_monitoring(state: State<'_, AppState>, enabled: bool) -> Result<bool,
 }
 
 #[tauri::command]
+pub fn get_app_version() -> Result<String, String> {
+    Ok(env!("CARGO_PKG_VERSION").to_string())
+}
+
+#[tauri::command]
 pub fn get_close_to_tray(state: State<'_, AppState>) -> Result<bool, String> {
     Ok(state.close_to_tray.load(Ordering::Relaxed))
 }
