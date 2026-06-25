@@ -69,7 +69,7 @@ button {
   --accent: #256fe6;
   --accent-2: #0f9278;
   --danger: #b4233b;
-  --shadow: 0 18px 48px rgba(24, 36, 28, 0.08);
+  --shadow: 0 16px 34px rgba(24, 36, 28, 0.045);
 }
 
 .app-shell {
@@ -78,9 +78,7 @@ button {
   display: grid;
   grid-template-columns: 236px minmax(0, 1fr);
   overflow: hidden;
-  background:
-    radial-gradient(circle at 70% 0, color-mix(in srgb, var(--accent) 10%, transparent), transparent 34%),
-    var(--bg);
+  background: var(--bg);
   transition: grid-template-columns 220ms ease;
 }
 
@@ -240,9 +238,7 @@ button {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background:
-    linear-gradient(180deg, color-mix(in srgb, var(--panel) 38%, transparent), transparent 260px),
-    var(--bg);
+  background: var(--bg);
 }
 
 .topbar {
@@ -720,27 +716,41 @@ p {
   position: absolute;
   left: 50%;
   bottom: 28px;
-  z-index: 4;
+  z-index: 20;
   width: max-content;
   max-width: 270px;
   display: none;
-  gap: 5px;
-  padding: 10px;
-  border: 1px solid var(--line);
+  gap: 6px;
+  padding: 10px 11px;
+  border: 1px solid color-mix(in srgb, var(--line) 74%, white);
   border-radius: 8px;
   color: var(--text);
-  background: color-mix(in srgb, var(--panel) 96%, black);
-  box-shadow: var(--shadow);
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  box-shadow: 0 18px 45px rgba(0, 0, 0, 0.18), 0 0 0 1px rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(18px) saturate(1.25);
   opacity: 0;
   pointer-events: none;
-  transform: translateX(-50%) translateY(4px);
-  transition: opacity 140ms ease, transform 140ms ease;
+  transform: translateX(-50%) translateY(8px) scale(0.98);
 }
 
 .timeline-column:hover .timeline-tooltip {
   display: grid;
   opacity: 1;
-  transform: translateX(-50%) translateY(0);
+  transform: translateX(-50%) translateY(0) scale(1);
+  animation: tooltip-pop 160ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.timeline-tooltip::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -5px;
+  width: 9px;
+  height: 9px;
+  border-right: 1px solid color-mix(in srgb, var(--line) 74%, white);
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 74%, white);
+  background: inherit;
+  transform: translateX(-50%) rotate(45deg);
 }
 
 .timeline-tooltip strong {
@@ -770,20 +780,54 @@ p {
   gap: 18px;
 }
 
-.donut-chart {
-  --donut: conic-gradient(var(--accent), var(--accent));
+.ring-donut {
+  position: relative;
   width: min(100%, 180px);
   aspect-ratio: 1;
   display: grid;
   place-items: center;
   justify-self: center;
-  border-radius: 50%;
-  background: var(--donut);
-  box-shadow: inset 0 0 0 1px var(--line);
 }
 
-.donut-chart > div {
-  width: 62%;
+.compact-ring {
+  width: min(100%, 136px);
+  align-self: center;
+}
+
+.ring-donut svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.donut-base,
+.donut-segment-path {
+  fill: none;
+}
+
+.donut-base {
+  stroke: color-mix(in srgb, var(--text-muted) 13%, transparent);
+}
+
+.donut-segment-path {
+  cursor: pointer;
+  outline: none;
+  pointer-events: stroke;
+  stroke-linecap: round;
+  transition: opacity 160ms ease, stroke-width 160ms ease, filter 160ms ease;
+}
+
+.donut-segment-path:hover,
+.donut-segment-path:focus-visible,
+.donut-segment-path[data-active="true"] {
+  filter: drop-shadow(0 6px 10px color-mix(in srgb, currentColor 28%, transparent));
+  opacity: 0.92;
+}
+
+.donut-center {
+  position: absolute;
+  inset: 50%;
+  width: 61%;
   aspect-ratio: 1;
   display: grid;
   place-items: center;
@@ -791,18 +835,70 @@ p {
   gap: 4px;
   border-radius: 50%;
   background: var(--panel);
+  box-shadow: inset 0 0 0 1px var(--line-soft);
   text-align: center;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
 }
 
-.donut-chart strong {
+.donut-center strong {
   font-size: 18px;
   line-height: 1;
 }
 
-.donut-chart span {
+.donut-center span {
   color: var(--text-muted);
   font-size: 11px;
   font-weight: 750;
+}
+
+.chart-tooltip-floating {
+  position: fixed;
+  z-index: 100;
+  min-width: 148px;
+  display: grid;
+  gap: 5px;
+  padding: 10px 11px;
+  border: 1px solid color-mix(in srgb, var(--line) 74%, white);
+  border-radius: 8px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  box-shadow: 0 18px 45px rgba(0, 0, 0, 0.2), 0 0 0 1px rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(18px) saturate(1.25);
+  opacity: 1;
+  pointer-events: none;
+  transform: translate3d(0, 0, 0) scale(1);
+  transition: left 80ms ease, top 80ms ease, opacity 150ms ease, transform 150ms ease;
+}
+
+.chart-tooltip-floating::before {
+  content: "";
+  position: absolute;
+  left: -5px;
+  top: 14px;
+  width: 9px;
+  height: 9px;
+  border-left: 1px solid color-mix(in srgb, var(--line) 74%, white);
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 74%, white);
+  background: inherit;
+  transform: rotate(45deg);
+}
+
+.chart-tooltip-floating strong {
+  max-width: 210px;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chart-tooltip-floating span,
+.chart-tooltip-floating em {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 720;
 }
 
 .donut-legend,
@@ -1296,6 +1392,25 @@ tbody tr:hover {
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes tooltip-pop {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(8px) scale(0.98);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0) scale(1);
+  }
+}
+
+@starting-style {
+  .chart-tooltip-floating {
+    opacity: 0;
+    transform: translate3d(0, 6px, 0) scale(0.98);
   }
 }
 

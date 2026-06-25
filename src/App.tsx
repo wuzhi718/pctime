@@ -20,7 +20,7 @@ import {
   TimerReset,
   type LucideIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties, type MouseEvent, type PointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
@@ -38,6 +38,7 @@ type WindowSummary = { app_name: string; window_title: string; category: string;
 type TimelineApp = { app_name: string; category: string; seconds: number };
 type TimelinePoint = { hour: string; active_seconds: number; idle_seconds: number; top_apps: TimelineApp[] };
 type LiveWindow = { app_name: string; window_title: string; category: string; visible_area: number; visible_share: number; focused: boolean };
+type DonutSegment = { key: string; label: string; valueLabel: string; shareLabel: string; color: string; share: number };
 type CaptureHealth = {
   monitoring: boolean;
   database_path: string;
@@ -122,6 +123,7 @@ const copy = {
       System: "系统",
       PCTime: "PCTime",
       Idle: "离开",
+      Other: "其它",
       Unclassified: "未分类",
     },
     range: {
@@ -226,6 +228,7 @@ const copy = {
       System: "System",
       PCTime: "PCTime",
       Idle: "Idle",
+      Other: "Other",
       Unclassified: "Unclassified",
     },
     range: {
@@ -305,6 +308,7 @@ const categoryColors: Record<string, string> = {
   System: "#6b7280",
   PCTime: "#14a38b",
   Idle: "#9ca3af",
+  Other: "#94a3b8",
   Unclassified: "#b45309",
 };
 
@@ -716,24 +720,22 @@ function CategoryRow({ category, t }: { category: CategorySummary; t: UiCopy }) 
 function CategoryDonut({ categories, t }: { categories: CategorySummary[]; t: UiCopy }) {
   if (!categories.length) return <EmptyState label={t.empty.noActivity} />;
 
-  const top = categories.slice(0, 6);
-  const gradient = buildDonutGradient(top);
   const totalSeconds = categories.reduce((sum, category) => sum + category.seconds, 0);
+  const segments = buildCategorySegments(categories, t);
 
   return (
     <div className="donut-layout">
-      <div className="donut-chart" style={{ "--donut": gradient } as CSSProperties}>
-        <div>
-          <strong>{formatDuration(totalSeconds)}</strong>
-          <span>{t.table.visible}</span>
-        </div>
-      </div>
+      <RingDonut
+        centerLabel={t.table.visible}
+        centerValue={formatDuration(totalSeconds)}
+        segments={segments}
+      />
       <div className="donut-legend">
-        {top.map((category) => (
-          <div className="donut-legend-row" key={category.category}>
-            <span style={{ "--accent": categoryColor(category.category) } as CSSProperties} />
-            <strong>{categoryLabel(category.category, t)}</strong>
-            <em>{formatPercent(category.share)}</em>
+        {segments.map((segment) => (
+          <div className="donut-legend-row" key={segment.key}>
+            <span style={{ "--accent": segment.color } as CSSProperties} />
+            <strong>{segment.label}</strong>
+            <em>{segment.shareLabel}</em>
           </div>
         ))}
       </div>
@@ -778,26 +780,128 @@ function TopAppsVisual({ apps, t }: { apps: AppSummary[]; t: UiCopy }) {
 }
 
 function AppShareDonut({ apps, t }: { apps: AppSummary[]; t: UiCopy }) {
-  const totalSeconds = apps.reduce((sum, app) => sum + app.seconds, 0);
-  const gradient = buildAppDonutGradient(apps);
+  const totalSeconds = Math.max(apps.reduce((sum, app) => sum + app.seconds, 0), 1);
+  const segments = buildAppSegments(apps);
 
   return (
     <div className="app-share-card">
-      <div className="mini-donut" style={{ "--donut": gradient } as CSSProperties}>
-        <div>
-          <strong>{apps.length}</strong>
-          <span>{t.table.application}</span>
-        </div>
-      </div>
+      <RingDonut
+        centerLabel={t.table.application}
+        centerValue={String(apps.length)}
+        segments={segments}
+        compact
+      />
       <div className="mini-donut-list">
         {apps.slice(0, 5).map((app, index) => (
           <div key={`${app.app_name}-${app.category}-share`}>
             <span style={{ "--accent": appColor(app, index) } as CSSProperties} />
             <strong>{app.app_name}</strong>
-            <em>{totalSeconds > 0 ? formatPercent(app.seconds / totalSeconds) : "0%"}</em>
+            <em>{formatPercent(app.seconds / totalSeconds)}</em>
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function RingDonut({ centerLabel, centerValue, compact = false, segments }: { centerLabel: string; centerValue: string; compact?: boolean; segments: DonutSegment[] }) {
+  const [active, setActive] = useState<DonutSegment | null>(null);
+  const [tooltip, setTooltip] = useState({ x: 0, y: 0 });
+  const radius = 46;
+  const stroke = compact ? 12 : 14;
+  const circumference = 2 * Math.PI * radius;
+  const gap = segments.length > 1 ? 1.8 : 0;
+  let cursor = 0;
+
+  const showSegment = (segment: DonutSegment, event: { clientX: number; clientY: number }) => {
+    setActive(segment);
+    setTooltip({ x: event.clientX, y: event.clientY });
+  };
+
+  const locateSegment = (event: PointerEvent<HTMLDivElement> | MouseEvent<HTMLDivElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    const x = event.clientX - centerX;
+    const y = event.clientY - centerY;
+    const distance = Math.hypot(x, y);
+    const outerRadius = Math.min(rect.width, rect.height) / 2;
+    const innerRadius = outerRadius * 0.54;
+
+    if (distance < innerRadius || distance > outerRadius) {
+      setActive(null);
+      return;
+    }
+
+    const angle = (Math.atan2(y, x) * 180 / Math.PI + 90 + 360) % 360;
+    const ratio = angle / 360;
+    let cursorShare = 0;
+    const segment = segments.find((item) => {
+      const start = cursorShare;
+      cursorShare += item.share;
+      return ratio >= start && ratio <= cursorShare;
+    }) ?? segments[segments.length - 1];
+
+    if (segment) showSegment(segment, event);
+  };
+
+  return (
+    <div
+      className={compact ? "ring-donut compact-ring" : "ring-donut"}
+      onClick={locateSegment}
+      onPointerLeave={() => setActive(null)}
+      onPointerMove={locateSegment}
+    >
+      <svg viewBox="0 0 120 120">
+        <circle className="donut-base" cx="60" cy="60" r={radius} strokeWidth={stroke} />
+        {segments.map((segment) => {
+          const length = segment.share * circumference;
+          const dash = Math.max(length - gap, 0);
+          const offset = -cursor;
+          cursor += length;
+
+          return (
+            <circle
+              className="donut-segment-path"
+              cx="60"
+              cy="60"
+              data-active={active?.key === segment.key ? "true" : undefined}
+              key={segment.key}
+              r={radius}
+              role="img"
+              stroke={segment.color}
+              strokeDasharray={`${dash} ${circumference - dash}`}
+              strokeDashoffset={offset}
+              strokeWidth={stroke}
+              tabIndex={0}
+              transform="rotate(-90 60 60)"
+              aria-label={`${segment.label}: ${segment.valueLabel}, ${segment.shareLabel}`}
+              onBlur={() => setActive(null)}
+              onFocus={(event) => {
+                const rect = event.currentTarget.getBoundingClientRect();
+                setActive(segment);
+                setTooltip({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+              }}
+            >
+              <title>{`${segment.label}: ${segment.valueLabel}, ${segment.shareLabel}`}</title>
+            </circle>
+          );
+        })}
+      </svg>
+      <div className="donut-center">
+        <strong>{centerValue}</strong>
+        <span>{centerLabel}</span>
+      </div>
+      {active ? (
+        <div
+          className="chart-tooltip-floating"
+          style={{ left: tooltip.x + 14, top: tooltip.y - 12 } as CSSProperties}
+        >
+          <strong>{active.label}</strong>
+          <span>{active.valueLabel}</span>
+          <em>{active.shareLabel}</em>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -855,39 +959,50 @@ function Timeline({ points, t }: { points: TimelinePoint[]; t: UiCopy }) {
   );
 }
 
-function buildDonutGradient(categories: CategorySummary[]) {
-  let cursor = 0;
-  const stops = categories.flatMap((category) => {
-    const start = cursor;
-    const end = Math.min(100, cursor + category.share * 100);
-    cursor = end;
-    const color = categoryColor(category.category);
-    return [`${color} ${start}%`, `${color} ${end}%`];
-  });
+function buildCategorySegments(categories: CategorySummary[], t: UiCopy): DonutSegment[] {
+  const totalSeconds = Math.max(categories.reduce((sum, category) => sum + category.seconds, 0), 1);
+  const top = categories.slice(0, 6);
+  const topSeconds = top.reduce((sum, category) => sum + category.seconds, 0);
+  const segments = top.map((category) => ({
+    key: category.category,
+    label: categoryLabel(category.category, t),
+    valueLabel: formatDuration(category.seconds),
+    shareLabel: formatPercent(category.seconds / totalSeconds),
+    color: categoryColor(category.category),
+    share: category.seconds / totalSeconds,
+  }));
+  const otherSeconds = categories.length > top.length ? Math.max(0, totalSeconds - topSeconds) : 0;
 
-  if (cursor < 100) {
-    stops.push(`rgba(120, 130, 140, 0.16) ${cursor}%`, "rgba(120, 130, 140, 0.16) 100%");
+  if (otherSeconds > 0) {
+    segments.push({
+      key: "Other",
+      label: categoryLabel("Other", t),
+      valueLabel: formatDuration(otherSeconds),
+      shareLabel: formatPercent(otherSeconds / totalSeconds),
+      color: categoryColor("Other"),
+      share: otherSeconds / totalSeconds,
+    });
   }
 
-  return `conic-gradient(${stops.join(", ")})`;
+  return normalizeSegments(segments);
 }
 
-function buildAppDonutGradient(apps: AppSummary[]) {
-  const total = apps.reduce((sum, app) => sum + app.seconds, 0);
-  let cursor = 0;
-  const stops = apps.flatMap((app, index) => {
-    const start = cursor;
-    const end = total > 0 ? Math.min(100, cursor + (app.seconds / total) * 100) : cursor;
-    cursor = end;
-    const color = appColor(app, index);
-    return [`${color} ${start}%`, `${color} ${end}%`];
-  });
+function buildAppSegments(apps: AppSummary[]): DonutSegment[] {
+  const totalSeconds = Math.max(apps.reduce((sum, app) => sum + app.seconds, 0), 1);
+  return normalizeSegments(apps.map((app, index) => ({
+    key: `${app.app_name}-${app.category}`,
+    label: app.app_name,
+    valueLabel: formatDuration(app.seconds),
+    shareLabel: formatPercent(app.seconds / totalSeconds),
+    color: appColor(app, index),
+    share: app.seconds / totalSeconds,
+  })));
+}
 
-  if (cursor < 100) {
-    stops.push(`rgba(120, 130, 140, 0.16) ${cursor}%`, "rgba(120, 130, 140, 0.16) 100%");
-  }
-
-  return `conic-gradient(${stops.join(", ")})`;
+function normalizeSegments(segments: DonutSegment[]) {
+  const totalShare = segments.reduce((sum, segment) => sum + segment.share, 0);
+  if (totalShare <= 0) return [];
+  return segments.map((segment) => ({ ...segment, share: segment.share / totalShare }));
 }
 
 function appColor(app: AppSummary, index: number) {
