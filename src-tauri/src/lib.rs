@@ -15,9 +15,19 @@ use std::sync::{
 use std::thread;
 use std::time::Duration;
 
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
-use tauri::Manager;
+use tauri::{AppHandle, Emitter, Manager};
 use tauri::WindowEvent;
+use tauri_plugin_opener::OpenerExt;
+
+const TRAY_SHOW: &str = "tray_show";
+const TRAY_SETTINGS: &str = "tray_settings";
+const TRAY_FEEDBACK: &str = "tray_feedback";
+const TRAY_PROJECT: &str = "tray_project";
+const TRAY_QUIT: &str = "tray_quit";
+const PROJECT_URL: &str = "https://github.com/wuzhi718/pctime";
+const FEEDBACK_URL: &str = "https://github.com/wuzhi718/pctime/issues";
 
 pub struct AppState {
     pub db_path: PathBuf,
@@ -37,10 +47,33 @@ fn start_monitor(db_path: PathBuf, monitoring: Arc<AtomicBool>) {
     });
 }
 
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            TRAY_SHOW => show_main_window(app),
+            TRAY_SETTINGS => {
+                show_main_window(app);
+                let _ = app.emit("pctime://open-settings", ());
+            }
+            TRAY_FEEDBACK => {
+                let _ = app.opener().open_url(FEEDBACK_URL, None::<&str>);
+            }
+            TRAY_PROJECT => {
+                let _ = app.opener().open_url(PROJECT_URL, None::<&str>);
+            }
+            TRAY_QUIT => app.exit(0),
+            _ => {}
+        })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let state = window.state::<AppState>();
@@ -69,16 +102,25 @@ pub fn run() {
             start_monitor(db_path.clone(), Arc::clone(&monitoring));
 
             if let Some(icon) = app.default_window_icon().cloned() {
+                let show = MenuItem::with_id(app, TRAY_SHOW, "显示主界面", true, None::<&str>)?;
+                let settings = MenuItem::with_id(app, TRAY_SETTINGS, "设置", true, None::<&str>)?;
+                let feedback = MenuItem::with_id(app, TRAY_FEEDBACK, "意见反馈", true, None::<&str>)?;
+                let project = MenuItem::with_id(app, TRAY_PROJECT, "项目主页", true, None::<&str>)?;
+                let separator = PredefinedMenuItem::separator(app)?;
+                let quit = MenuItem::with_id(app, TRAY_QUIT, "退出应用", true, None::<&str>)?;
+                let tray_menu = Menu::with_items(
+                    app,
+                    &[&show, &settings, &feedback, &project, &separator, &quit],
+                )?;
+
                 let _ = TrayIconBuilder::new()
                     .icon(icon)
+                    .menu(&tray_menu)
                     .tooltip("PCTime")
                     .show_menu_on_left_click(false)
                     .on_tray_icon_event(|tray, event| match event {
                         TrayIconEvent::Click { .. } | TrayIconEvent::DoubleClick { .. } => {
-                            if let Some(window) = tray.app_handle().get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
+                            show_main_window(tray.app_handle());
                         }
                         _ => {}
                     })

@@ -1,6 +1,6 @@
 [package]
 name = "pctime"
-version = "0.1.2"
+version = "0.1.3"
 description = "Visible-window desktop time tracker"
 authors = ["PCTime contributors"]
 edition = "2021"

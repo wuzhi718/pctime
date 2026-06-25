@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import "./App.css";
 
@@ -399,7 +400,7 @@ function App() {
   const [rangePreset, setRangePreset] = useState<RangePreset>(() => readStorage("pctime-range", "day"));
   const [customStart, setCustomStart] = useState(() => toLocalInput(startOfToday()));
   const [customEnd, setCustomEnd] = useState(() => toLocalInput(new Date()));
-  const [appVersion, setAppVersion] = useState("0.1.2");
+  const [appVersion, setAppVersion] = useState("0.1.3");
   const [startupEnabled, setStartupEnabled] = useState<boolean | null>(null);
   const [closeToTray, setCloseToTray] = useState<boolean | null>(null);
   const [updateState, setUpdateState] = useState<UpdateState>(emptyUpdateState);
@@ -462,7 +463,21 @@ function App() {
   useEffect(() => {
     void appInvoke<string>("get_app_version")
       .then(setAppVersion)
-      .catch(() => setAppVersion("0.1.2"));
+      .catch(() => setAppVersion("0.1.3"));
+  }, []);
+
+  useEffect(() => {
+    const hasTauri = Boolean((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
+    if (!hasTauri) return;
+
+    let unlisten: (() => void) | undefined;
+    void listen("pctime://open-settings", () => setView("settings"))
+      .then((handler) => {
+        unlisten = handler;
+      })
+      .catch(() => {});
+
+    return () => unlisten?.();
   }, []);
 
   useEffect(() => {
@@ -1435,7 +1450,7 @@ async function appInvoke<T>(command: string, args?: Record<string, unknown>): Pr
 
 function demoResponse(command: string, args?: Record<string, unknown>) {
   if (command === "get_dashboard") return demoDashboard(args?.range as RangePayload | undefined);
-  if (command === "get_app_version") return "0.1.2";
+  if (command === "get_app_version") return "0.1.3";
   if (command === "get_startup_enabled") return false;
   if (command === "set_startup_enabled") return Boolean(args?.enabled);
   if (command === "get_close_to_tray") return true;
