@@ -11,6 +11,7 @@ use crate::{sampler, storage, AppState};
 struct UserSettings {
     close_to_tray: Option<bool>,
     sample_interval_ms: Option<u64>,
+    always_active_pattern: Option<String>,
 }
 
 #[tauri::command]
@@ -31,9 +32,16 @@ pub fn get_dashboard(
 
 #[tauri::command]
 pub fn record_now(state: State<'_, AppState>) -> Result<CaptureStats, String> {
+    let always_active_pattern = state
+        .always_active_pattern
+        .read()
+        .map(|value| value.clone())
+        .unwrap_or_default();
+
     sampler::capture_current(
         &state.db_path,
         sampler::normalize_sample_interval_ms(state.sample_interval_ms.load(Ordering::Relaxed)),
+        &always_active_pattern,
     )
 }
 
@@ -83,6 +91,32 @@ pub fn set_sample_interval_ms(state: State<'_, AppState>, interval_ms: u64) -> R
 }
 
 #[tauri::command]
+pub fn get_always_active_pattern(state: State<'_, AppState>) -> Result<String, String> {
+    state
+        .always_active_pattern
+        .read()
+        .map(|value| value.clone())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn set_always_active_pattern(
+    state: State<'_, AppState>,
+    pattern: String,
+) -> Result<String, String> {
+    let normalized = pattern.trim().to_string();
+    {
+        let mut value = state
+            .always_active_pattern
+            .write()
+            .map_err(|error| error.to_string())?;
+        *value = normalized.clone();
+    }
+    save_always_active_pattern(&state.settings_path, &normalized)?;
+    Ok(normalized)
+}
+
+#[tauri::command]
 pub fn get_startup_enabled() -> Result<bool, String> {
     startup_enabled()
 }
@@ -106,6 +140,12 @@ pub fn load_sample_interval_ms(settings_path: &Path) -> u64 {
         .unwrap_or(sampler::DEFAULT_SAMPLE_INTERVAL_MS)
 }
 
+pub fn load_always_active_pattern(settings_path: &Path) -> String {
+    load_settings(settings_path)
+        .and_then(|settings| settings.always_active_pattern)
+        .unwrap_or_default()
+}
+
 fn save_close_to_tray(settings_path: &Path, enabled: bool) -> Result<(), String> {
     let mut settings = load_settings(settings_path).unwrap_or_default();
     settings.close_to_tray = Some(enabled);
@@ -115,6 +155,12 @@ fn save_close_to_tray(settings_path: &Path, enabled: bool) -> Result<(), String>
 fn save_sample_interval_ms(settings_path: &Path, interval_ms: u64) -> Result<(), String> {
     let mut settings = load_settings(settings_path).unwrap_or_default();
     settings.sample_interval_ms = Some(sampler::normalize_sample_interval_ms(interval_ms));
+    save_settings(settings_path, &settings)
+}
+
+fn save_always_active_pattern(settings_path: &Path, pattern: &str) -> Result<(), String> {
+    let mut settings = load_settings(settings_path).unwrap_or_default();
+    settings.always_active_pattern = Some(pattern.to_string());
     save_settings(settings_path, &settings)
 }
 

@@ -10,7 +10,7 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc,
+    Arc, RwLock,
 };
 use std::thread;
 use std::time::Duration;
@@ -36,19 +36,25 @@ pub struct AppState {
     pub close_to_tray: Arc<AtomicBool>,
     pub monitoring: Arc<AtomicBool>,
     pub sample_interval_ms: Arc<AtomicU64>,
+    pub always_active_pattern: Arc<RwLock<String>>,
 }
 
 fn start_monitor(
     db_path: PathBuf,
     monitoring: Arc<AtomicBool>,
     sample_interval_ms: Arc<AtomicU64>,
+    always_active_pattern: Arc<RwLock<String>>,
 ) {
     thread::spawn(move || loop {
         let interval_ms =
             sampler::normalize_sample_interval_ms(sample_interval_ms.load(Ordering::Relaxed));
 
         if monitoring.load(Ordering::Relaxed) {
-            let _ = sampler::capture_current(&db_path, interval_ms);
+            let pattern = always_active_pattern
+                .read()
+                .map(|value| value.clone())
+                .unwrap_or_default();
+            let _ = sampler::capture_current(&db_path, interval_ms, &pattern);
         }
 
         thread::sleep(Duration::from_millis(interval_ms));
@@ -109,11 +115,15 @@ pub fn run() {
             let sample_interval_ms = Arc::new(AtomicU64::new(commands::load_sample_interval_ms(
                 &settings_path,
             )));
+            let always_active_pattern = Arc::new(RwLock::new(
+                commands::load_always_active_pattern(&settings_path),
+            ));
 
             start_monitor(
                 db_path.clone(),
                 Arc::clone(&monitoring),
                 Arc::clone(&sample_interval_ms),
+                Arc::clone(&always_active_pattern),
             );
 
             if let Some(icon) = app.default_window_icon().cloned() {
@@ -157,6 +167,7 @@ pub fn run() {
                 close_to_tray,
                 monitoring,
                 sample_interval_ms,
+                always_active_pattern,
             });
 
             Ok(())
@@ -171,6 +182,8 @@ pub fn run() {
             commands::set_close_to_tray,
             commands::get_sample_interval_ms,
             commands::set_sample_interval_ms,
+            commands::get_always_active_pattern,
+            commands::set_always_active_pattern,
             commands::get_startup_enabled,
             commands::set_startup_enabled
         ])

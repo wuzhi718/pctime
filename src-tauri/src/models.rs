@@ -148,6 +148,8 @@ pub struct RangeQuery {
     pub preset: String,
     pub start_ms: Option<i64>,
     pub end_ms: Option<i64>,
+    pub start_of_day_minutes: Option<i64>,
+    pub week_start: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

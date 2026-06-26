@@ -16,11 +16,21 @@ pub fn normalize_sample_interval_ms(interval_ms: u64) -> u64 {
     interval_ms.clamp(MIN_SAMPLE_INTERVAL_MS, MAX_SAMPLE_INTERVAL_MS)
 }
 
-pub fn capture_current(db_path: &Path, duration_ms: u64) -> Result<CaptureStats, String> {
+pub fn capture_current(
+    db_path: &Path,
+    duration_ms: u64,
+    always_active_pattern: &str,
+) -> Result<CaptureStats, String> {
     let captured_at = Local::now().timestamp_millis();
     let idle_seconds = collector::idle_seconds().unwrap_or(0);
-    let idle = idle_seconds >= IDLE_THRESHOLD_SECONDS;
-    let samples = if idle { Vec::new() } else { current_samples()? };
+    let input_idle = idle_seconds >= IDLE_THRESHOLD_SECONDS;
+    let samples = if input_idle && always_active_pattern.trim().is_empty() {
+        Vec::new()
+    } else {
+        current_samples()?
+    };
+    let idle = input_idle && !matches_always_active(&samples, always_active_pattern);
+    let samples = if idle { Vec::new() } else { samples };
 
     storage::insert_samples(
         db_path,
@@ -56,4 +66,25 @@ pub fn live_windows() -> Result<Vec<LiveWindow>, String> {
 fn current_samples() -> Result<Vec<WindowSample>, String> {
     let raw = collector::collect_windows()?;
     Ok(visibility::compute_visible_windows(raw))
+}
+
+fn matches_always_active(samples: &[WindowSample], pattern: &str) -> bool {
+    let tokens = pattern
+        .split('|')
+        .map(|token| token.trim().to_lowercase())
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+
+    if tokens.is_empty() {
+        return false;
+    }
+
+    samples.iter().any(|sample| {
+        let haystack = format!(
+            "{}\n{}\n{}\n{}",
+            sample.app_name, sample.window_title, sample.process_path, sample.category
+        )
+        .to_lowercase();
+        tokens.iter().any(|token| haystack.contains(token))
+    })
 }

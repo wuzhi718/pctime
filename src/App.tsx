@@ -2,6 +2,7 @@ import {
   Activity,
   BarChart3,
   CalendarDays,
+  CalendarClock,
   Clock,
   Gauge,
   HardDrive,
@@ -37,8 +38,15 @@ type ViewId = "overview" | "activity" | "settings";
 type Locale = "zh-CN" | "en-US";
 type Theme = "dark" | "light";
 type RangePreset = "day" | "week" | "month" | "year" | "custom";
+type WeekStart = "monday" | "sunday";
 
-type RangePayload = { preset: RangePreset; start_ms?: number; end_ms?: number };
+type RangePayload = {
+  preset: RangePreset;
+  start_ms?: number;
+  end_ms?: number;
+  start_of_day_minutes?: number;
+  week_start?: WeekStart;
+};
 type RangeInfo = { preset: string; start_ms: number; end_ms: number; label: string; bucket: string };
 type MetricCard = { label: string; value_seconds: number; helper: string };
 type CategorySummary = { category: string; seconds: number; focus_seconds: number; share: number; sample_count: number };
@@ -101,6 +109,7 @@ const copy = {
       applications: "应用明细",
       topApps: "高频应用",
       appearance: "外观",
+      tracking: "追踪规则",
       startup: "系统",
       storage: "存储与性能",
     },
@@ -156,6 +165,13 @@ const copy = {
       theme: "主题",
       dark: "黑色",
       light: "白色",
+      startOfDay: "一天开始于",
+      weekStart: "每周开始于",
+      monday: "周一",
+      sunday: "周日",
+      releaseNotifications: "新版本提醒",
+      alwaysActivePattern: "始终视为活跃",
+      alwaysActivePatternHint: "用 | 分隔关键词，例如 Zoom|Teams|bilibili。",
       startup: "开机自启动",
       startupHint: "登录 Windows 后自动启动 PCTime。",
       closeToTray: "关闭按钮放到后台",
@@ -211,6 +227,7 @@ const copy = {
       applications: "Application details",
       topApps: "Top apps",
       appearance: "Appearance",
+      tracking: "Tracking rules",
       startup: "System",
       storage: "Storage and performance",
     },
@@ -266,6 +283,13 @@ const copy = {
       theme: "Theme",
       dark: "Dark",
       light: "Light",
+      startOfDay: "Start of day",
+      weekStart: "Start of week",
+      monday: "Monday",
+      sunday: "Sunday",
+      releaseNotifications: "New release notification",
+      alwaysActivePattern: "Always count as active",
+      alwaysActivePatternHint: "Separate keywords with |, e.g. Zoom|Teams|bilibili.",
       startup: "Start at login",
       startupHint: "Launch PCTime automatically after signing in to Windows.",
       closeToTray: "Close to background",
@@ -309,6 +333,7 @@ type UiCopy = (typeof copy)[Locale];
 const UPDATE_ENDPOINT = "https://api.github.com/repos/wuzhi718/pctime/releases/latest";
 const UPDATE_CHECK_KEY = "pctime-last-update-check";
 const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1_000;
+const DEFAULT_START_OF_DAY = "04:00";
 
 const cardIcons: Record<string, LucideIcon> = {
   "Visible time": Activity,
@@ -382,7 +407,11 @@ function App() {
   const [rangePreset, setRangePreset] = useState<RangePreset>(() => readStorage("pctime-range", "day"));
   const [customStart, setCustomStart] = useState(() => toLocalInput(startOfToday()));
   const [customEnd, setCustomEnd] = useState(() => toLocalInput(new Date()));
-  const [appVersion, setAppVersion] = useState("0.1.5");
+  const [startOfDay, setStartOfDay] = useState<string>(() => readStorage("pctime-start-of-day", DEFAULT_START_OF_DAY));
+  const [weekStart, setWeekStart] = useState<WeekStart>(() => readStorage("pctime-week-start", "monday"));
+  const [releaseNotifications, setReleaseNotifications] = useState(() => readStorage("pctime-release-notifications", "true") === "true");
+  const [alwaysActivePattern, setAlwaysActivePattern] = useState("");
+  const [appVersion, setAppVersion] = useState("0.1.6");
   const [startupEnabled, setStartupEnabled] = useState<boolean | null>(null);
   const [closeToTray, setCloseToTray] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(true);
@@ -393,13 +422,18 @@ function App() {
   const t = copy[locale];
 
   const range = useMemo<RangePayload>(() => {
-    if (rangePreset !== "custom") return { preset: rangePreset };
+    const preferences = {
+      start_of_day_minutes: timeToMinutes(startOfDay),
+      week_start: weekStart,
+    };
+    if (rangePreset !== "custom") return { preset: rangePreset, ...preferences };
     return {
       preset: "custom",
       start_ms: customStart ? new Date(customStart).getTime() : undefined,
       end_ms: customEnd ? new Date(customEnd).getTime() : undefined,
+      ...preferences,
     };
-  }, [customEnd, customStart, rangePreset]);
+  }, [customEnd, customStart, rangePreset, startOfDay, weekStart]);
 
   const loadDashboard = useCallback(async () => {
     try {
@@ -435,7 +469,7 @@ function App() {
   useEffect(() => {
     void appInvoke<string>("get_app_version")
       .then(setAppVersion)
-      .catch(() => setAppVersion("0.1.5"));
+      .catch(() => setAppVersion("0.1.6"));
   }, []);
 
   useEffect(() => {
@@ -453,14 +487,18 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!releaseNotifications) return;
     const lastCheck = Number(localStorage.getItem(UPDATE_CHECK_KEY) ?? "0");
     if (Date.now() - lastCheck < UPDATE_CHECK_INTERVAL_MS) return;
     void checkForUpdates();
-  }, [checkForUpdates]);
+  }, [checkForUpdates, releaseNotifications]);
 
   useEffect(() => localStorage.setItem("pctime-locale", locale), [locale]);
   useEffect(() => localStorage.setItem("pctime-theme", theme), [theme]);
   useEffect(() => localStorage.setItem("pctime-range", rangePreset), [rangePreset]);
+  useEffect(() => localStorage.setItem("pctime-start-of-day", startOfDay), [startOfDay]);
+  useEffect(() => localStorage.setItem("pctime-week-start", weekStart), [weekStart]);
+  useEffect(() => localStorage.setItem("pctime-release-notifications", String(releaseNotifications)), [releaseNotifications]);
   useEffect(() => localStorage.setItem("pctime-sidebar", sidebarCollapsed ? "collapsed" : "expanded"), [sidebarCollapsed]);
 
   useEffect(() => {
@@ -473,6 +511,12 @@ function App() {
     void appInvoke<boolean>("get_close_to_tray")
       .then(setCloseToTray)
       .catch(() => setCloseToTray(true));
+  }, []);
+
+  useEffect(() => {
+    void appInvoke<string>("get_always_active_pattern")
+      .then(setAlwaysActivePattern)
+      .catch(() => setAlwaysActivePattern(""));
   }, []);
 
   const filteredApps = useMemo(() => {
@@ -525,6 +569,15 @@ function App() {
         ? { ...current, health: { ...current.health, sample_interval_ms: actual } }
         : current);
       await loadDashboard();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
+  async function saveAlwaysActivePattern(pattern: string) {
+    try {
+      const actual = await appInvoke<string>("set_always_active_pattern", { pattern });
+      setAlwaysActivePattern(actual);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     }
@@ -620,18 +673,27 @@ function App() {
               filteredApps={filteredApps}
               locale={locale}
               query={query}
+              alwaysActivePattern={alwaysActivePattern}
+              releaseNotifications={releaseNotifications}
+              saveAlwaysActivePattern={saveAlwaysActivePattern}
+              setAlwaysActivePattern={setAlwaysActivePattern}
               setLocale={setLocale}
               setCloseToTray={changeCloseToTray}
+              setReleaseNotifications={setReleaseNotifications}
               setSampleInterval={changeSampleInterval}
               setQuery={setQuery}
+              setStartOfDay={setStartOfDay}
               setStartupEnabled={changeStartup}
               setTheme={setTheme}
+              setWeekStart={setWeekStart}
               showTooltip={showTooltip}
               hideTooltip={hideTooltip}
+              startOfDay={startOfDay}
               startupEnabled={startupEnabled}
               t={t}
               theme={theme}
               view={view}
+              weekStart={weekStart}
             />
           ) : (
             <EmptyState label={t.empty.unavailable} />
@@ -646,41 +708,59 @@ function App() {
 }
 
 function ActivePage({
+  alwaysActivePattern,
   dashboard,
   closeToTray,
   filteredApps,
   locale,
   query,
+  releaseNotifications,
+  saveAlwaysActivePattern,
+  setAlwaysActivePattern,
   setLocale,
   setCloseToTray,
+  setReleaseNotifications,
   setSampleInterval,
   setQuery,
+  setStartOfDay,
   setStartupEnabled,
   setTheme,
+  setWeekStart,
   showTooltip,
   hideTooltip,
+  startOfDay,
   startupEnabled,
   t,
   theme,
   view,
+  weekStart,
 }: {
+  alwaysActivePattern: string;
   dashboard: Dashboard;
   closeToTray: boolean | null;
   filteredApps: AppSummary[];
   locale: Locale;
   query: string;
+  releaseNotifications: boolean;
+  saveAlwaysActivePattern: (pattern: string) => Promise<void>;
+  setAlwaysActivePattern: (value: string) => void;
   setLocale: (value: Locale) => void;
   setCloseToTray: (enabled: boolean) => void;
+  setReleaseNotifications: (enabled: boolean) => void;
   setSampleInterval: (intervalMs: number) => void;
   setQuery: (value: string) => void;
+  setStartOfDay: (value: string) => void;
   setStartupEnabled: (enabled: boolean) => void;
   setTheme: (value: Theme) => void;
+  setWeekStart: (value: WeekStart) => void;
   showTooltip: (tooltip: FloatingTooltipData) => void;
   hideTooltip: () => void;
+  startOfDay: string;
   startupEnabled: boolean | null;
   t: UiCopy;
   theme: Theme;
   view: ViewId;
+  weekStart: WeekStart;
 }) {
   if (view === "activity") {
     return (
@@ -723,6 +803,42 @@ function ActivePage({
           </div>
         </Panel>
 
+        <Panel title={t.panels.tracking} action={<CalendarClock size={18} />}>
+          <div className="settings-stack">
+            <div className="settings-pair">
+              <SettingBlock label={t.settings.startOfDay}>
+                <input
+                  className="setting-input"
+                  type="time"
+                  value={startOfDay}
+                  onChange={(event) => setStartOfDay(event.currentTarget.value || DEFAULT_START_OF_DAY)}
+                />
+              </SettingBlock>
+              <SettingBlock label={t.settings.weekStart}>
+                <SegmentedWeekStart setWeekStart={setWeekStart} t={t} weekStart={weekStart} />
+              </SettingBlock>
+            </div>
+            <SettingBlock label={t.settings.sampleInterval}>
+              <SegmentedSampleInterval
+                onChange={setSampleInterval}
+                t={t}
+                value={dashboard.health.sample_interval_ms}
+              />
+              <small className="setting-hint">{t.settings.sampleIntervalHint}</small>
+            </SettingBlock>
+            <SettingBlock label={t.settings.alwaysActivePattern}>
+              <input
+                className="setting-input"
+                placeholder="Zoom|Teams|bilibili"
+                value={alwaysActivePattern}
+                onBlur={(event) => void saveAlwaysActivePattern(event.currentTarget.value)}
+                onChange={(event) => setAlwaysActivePattern(event.currentTarget.value)}
+              />
+              <small className="setting-hint">{t.settings.alwaysActivePatternHint}</small>
+            </SettingBlock>
+          </div>
+        </Panel>
+
         <Panel title={t.panels.startup} action={<Power size={18} />}>
           <div className="settings-stack">
             <SwitchRow
@@ -737,18 +853,15 @@ function ActivePage({
               label={t.settings.closeToTray}
               onChange={setCloseToTray}
             />
+            <SwitchRow
+              checked={releaseNotifications}
+              label={t.settings.releaseNotifications}
+              onChange={setReleaseNotifications}
+            />
           </div>
         </Panel>
 
         <Panel title={t.panels.storage} action={<HardDrive size={18} />}>
-          <SettingBlock label={t.settings.sampleInterval}>
-            <SegmentedSampleInterval
-              onChange={setSampleInterval}
-              t={t}
-              value={dashboard.health.sample_interval_ms}
-            />
-            <small className="setting-hint">{t.settings.sampleIntervalHint}</small>
-          </SettingBlock>
           <div className="settings-grid">
             <InfoItem label={t.status.storageLocation} value={storageLocationLabel(dashboard.health.storage_location, t)} />
             <InfoItem label={t.status.database} value={dashboard.health.database_path} />
@@ -1413,6 +1526,27 @@ function SegmentedTheme({ setTheme, t, theme }: { setTheme: (value: Theme) => vo
   );
 }
 
+function SegmentedWeekStart({
+  setWeekStart,
+  t,
+  weekStart,
+}: {
+  setWeekStart: (value: WeekStart) => void;
+  t: UiCopy;
+  weekStart: WeekStart;
+}) {
+  return (
+    <SegmentedControl
+      onChange={setWeekStart}
+      options={[
+        { label: t.settings.monday, value: "monday" },
+        { label: t.settings.sunday, value: "sunday" },
+      ]}
+      value={weekStart}
+    />
+  );
+}
+
 function SegmentedSampleInterval({ onChange, t, value }: { onChange: (intervalMs: number) => void; t: UiCopy; value: number }) {
   const normalizedValue = sampleIntervalOptions.includes(value) ? value : 5_000;
 
@@ -1497,13 +1631,15 @@ async function appInvoke<T>(command: string, args?: Record<string, unknown>): Pr
 
 function demoResponse(command: string, args?: Record<string, unknown>) {
   if (command === "get_dashboard") return demoDashboard(args?.range as RangePayload | undefined);
-  if (command === "get_app_version") return "0.1.5";
+  if (command === "get_app_version") return "0.1.6";
   if (command === "get_startup_enabled") return false;
   if (command === "set_startup_enabled") return Boolean(args?.enabled);
   if (command === "get_close_to_tray") return true;
   if (command === "set_close_to_tray") return Boolean(args?.enabled);
   if (command === "get_sample_interval_ms") return 5_000;
   if (command === "set_sample_interval_ms") return Number(args?.intervalMs ?? 5_000);
+  if (command === "get_always_active_pattern") return "";
+  if (command === "set_always_active_pattern") return String(args?.pattern ?? "");
   return { captured_at: Date.now(), windows_recorded: 3, idle: false, idle_seconds: 0 };
 }
 
@@ -1614,6 +1750,12 @@ function startOfToday() {
 function toLocalInput(date: Date) {
   const pad = (value: number) => String(value).padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function timeToMinutes(value: string) {
+  const [hours, minutes] = value.split(":").map((part) => Number.parseInt(part, 10));
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return 240;
+  return Math.min(23 * 60 + 59, Math.max(0, hours * 60 + minutes));
 }
 
 function formatPercent(value: number) {

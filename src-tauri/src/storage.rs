@@ -958,6 +958,15 @@ fn today_range_ms() -> (i64, i64) {
 
 fn resolve_range(query: Option<RangeQuery>) -> RangeInfo {
     let now = Local::now();
+    let start_of_day_minutes = query
+        .as_ref()
+        .and_then(|value| value.start_of_day_minutes)
+        .map(normalize_start_of_day_minutes)
+        .unwrap_or(240);
+    let week_start = query
+        .as_ref()
+        .and_then(|value| value.week_start.as_deref())
+        .unwrap_or("monday");
     let requested = query
         .as_ref()
         .map(|value| value.preset.clone())
@@ -986,22 +995,27 @@ fn resolve_range(query: Option<RangeQuery>) -> RangeInfo {
 
     let (preset, start, end, bucket) = match requested.as_str() {
         "week" => {
-            let today = start_of_day(now);
-            let start = today - chrono::Duration::days(now.weekday().num_days_from_monday() as i64);
+            let today = start_of_configured_day(now, start_of_day_minutes);
+            let days_since_start = match week_start {
+                "sunday" => today.weekday().num_days_from_sunday() as i64,
+                _ => today.weekday().num_days_from_monday() as i64,
+            };
+            let start = today - chrono::Duration::days(days_since_start);
             ("week", start, start + chrono::Duration::days(7), "day")
         }
         "month" => {
-            let start = local_date(now.year(), now.month(), 1);
+            let start = start_of_configured_month(now, start_of_day_minutes);
             let end = add_month(start);
             ("month", start, end, "day")
         }
         "year" => {
-            let start = local_date(now.year(), 1, 1);
-            let end = local_date(now.year() + 1, 1, 1);
+            let start = start_of_configured_year(now, start_of_day_minutes);
+            let end = local_date(start.year() + 1, 1, 1)
+                + chrono::Duration::minutes(start_of_day_minutes);
             ("year", start, end, "month")
         }
         _ => {
-            let start = start_of_day(now);
+            let start = start_of_configured_day(now, start_of_day_minutes);
             ("day", start, start + chrono::Duration::days(1), "hour")
         }
     };
@@ -1070,6 +1084,42 @@ fn bucket_for_span(span_ms: i64) -> String {
 
 fn start_of_day(dt: DateTime<Local>) -> DateTime<Local> {
     local_date(dt.year(), dt.month(), dt.day())
+}
+
+fn start_of_configured_day(dt: DateTime<Local>, start_minutes: i64) -> DateTime<Local> {
+    let boundary = start_of_day(dt) + chrono::Duration::minutes(start_minutes);
+    if dt < boundary {
+        boundary - chrono::Duration::days(1)
+    } else {
+        boundary
+    }
+}
+
+fn start_of_configured_month(dt: DateTime<Local>, start_minutes: i64) -> DateTime<Local> {
+    let boundary = local_date(dt.year(), dt.month(), 1) + chrono::Duration::minutes(start_minutes);
+    if dt >= boundary {
+        return boundary;
+    }
+
+    let (year, month) = if dt.month() == 1 {
+        (dt.year() - 1, 12)
+    } else {
+        (dt.year(), dt.month() - 1)
+    };
+    local_date(year, month, 1) + chrono::Duration::minutes(start_minutes)
+}
+
+fn start_of_configured_year(dt: DateTime<Local>, start_minutes: i64) -> DateTime<Local> {
+    let boundary = local_date(dt.year(), 1, 1) + chrono::Duration::minutes(start_minutes);
+    if dt < boundary {
+        local_date(dt.year() - 1, 1, 1) + chrono::Duration::minutes(start_minutes)
+    } else {
+        boundary
+    }
+}
+
+fn normalize_start_of_day_minutes(minutes: i64) -> i64 {
+    minutes.clamp(0, 23 * 60 + 59)
 }
 
 fn local_date(year: i32, month: u32, day: u32) -> DateTime<Local> {
@@ -1154,6 +1204,8 @@ mod tests {
                 preset: "custom".to_string(),
                 start_ms: Some(start_ms),
                 end_ms: Some(start_ms + duration_ms as i64 * 2),
+                start_of_day_minutes: None,
+                week_start: None,
             }),
             Vec::new(),
         )
