@@ -123,7 +123,7 @@ const copy = {
       samples: "样本",
     },
     cards: {
-      "Visible time": ["可见时间", "至少一个窗口可见时的真实经过时间"],
+      "Visible time": ["可见时间", "窗口可见总时长"],
       "Focused time": ["焦点时间", "传统前台窗口统计"],
       "Idle time": ["离开时间", "超过 5 分钟无输入后计入"],
       "Needs rules": ["待分类", "还没有匹配规则的可见时间"],
@@ -241,7 +241,7 @@ const copy = {
       samples: "Samples",
     },
     cards: {
-      "Visible time": ["Visible time", "Elapsed time while at least one window is visible"],
+      "Visible time": ["Visible time", "Window visible time"],
       "Focused time": ["Focused time", "Traditional foreground-window time"],
       "Idle time": ["Idle time", "No input for 5 minutes"],
       "Needs rules": ["Needs rules", "Unclassified visible time"],
@@ -791,77 +791,83 @@ function ActivePage({
 
   if (view === "settings") {
     return (
-      <div className="page-grid settings-page">
-        <Panel title={t.panels.appearance} action={<Languages size={18} />}>
-          <div className="settings-stack">
-            <SettingBlock label={t.settings.language}>
-              <SegmentedLanguage locale={locale} setLocale={setLocale} />
-            </SettingBlock>
-            <SettingBlock label={t.settings.theme}>
-              <SegmentedTheme setTheme={setTheme} t={t} theme={theme} />
-            </SettingBlock>
-          </div>
-        </Panel>
+      <div className="settings-page">
+        <div className="settings-main">
+          <div className="settings-column">
+            <Panel title={t.panels.appearance} action={<Languages size={18} />}>
+              <div className="settings-stack compact-settings">
+                <SettingBlock label={t.settings.language}>
+                  <SegmentedLanguage locale={locale} setLocale={setLocale} />
+                </SettingBlock>
+                <SettingBlock label={t.settings.theme}>
+                  <SegmentedTheme setTheme={setTheme} t={t} theme={theme} />
+                </SettingBlock>
+              </div>
+            </Panel>
 
-        <Panel title={t.panels.tracking} action={<CalendarClock size={18} />}>
-          <div className="settings-stack">
-            <div className="settings-pair">
-              <SettingBlock label={t.settings.startOfDay}>
-                <input
-                  className="setting-input"
-                  type="time"
-                  value={startOfDay}
-                  onChange={(event) => setStartOfDay(event.currentTarget.value || DEFAULT_START_OF_DAY)}
+            <Panel title={t.panels.startup} action={<Power size={18} />}>
+              <div className="settings-stack">
+                <SwitchRow
+                  checked={Boolean(startupEnabled)}
+                  disabled={startupEnabled === null}
+                  label={t.settings.startup}
+                  onChange={setStartupEnabled}
                 />
-              </SettingBlock>
-              <SettingBlock label={t.settings.weekStart}>
-                <SegmentedWeekStart setWeekStart={setWeekStart} t={t} weekStart={weekStart} />
-              </SettingBlock>
-            </div>
-            <SettingBlock label={t.settings.sampleInterval}>
-              <SegmentedSampleInterval
-                onChange={setSampleInterval}
-                t={t}
-                value={dashboard.health.sample_interval_ms}
-              />
-              <small className="setting-hint">{t.settings.sampleIntervalHint}</small>
-            </SettingBlock>
-            <SettingBlock label={t.settings.alwaysActivePattern}>
-              <input
-                className="setting-input"
-                placeholder="Zoom|Teams|bilibili"
-                value={alwaysActivePattern}
-                onBlur={(event) => void saveAlwaysActivePattern(event.currentTarget.value)}
-                onChange={(event) => setAlwaysActivePattern(event.currentTarget.value)}
-              />
-              <small className="setting-hint">{t.settings.alwaysActivePatternHint}</small>
-            </SettingBlock>
+                <SwitchRow
+                  checked={Boolean(closeToTray)}
+                  disabled={closeToTray === null}
+                  label={t.settings.closeToTray}
+                  onChange={setCloseToTray}
+                />
+                <SwitchRow
+                  checked={releaseNotifications}
+                  label={t.settings.releaseNotifications}
+                  onChange={setReleaseNotifications}
+                />
+              </div>
+            </Panel>
           </div>
-        </Panel>
 
-        <Panel title={t.panels.startup} action={<Power size={18} />}>
-          <div className="settings-stack">
-            <SwitchRow
-              checked={Boolean(startupEnabled)}
-              disabled={startupEnabled === null}
-              label={t.settings.startup}
-              onChange={setStartupEnabled}
-            />
-            <SwitchRow
-              checked={Boolean(closeToTray)}
-              disabled={closeToTray === null}
-              label={t.settings.closeToTray}
-              onChange={setCloseToTray}
-            />
-            <SwitchRow
-              checked={releaseNotifications}
-              label={t.settings.releaseNotifications}
-              onChange={setReleaseNotifications}
-            />
+          <div className="settings-column">
+            <Panel title={t.panels.tracking} action={<CalendarClock size={18} />}>
+              <div className="settings-stack">
+                <div className="settings-pair">
+                  <SettingBlock label={t.settings.startOfDay}>
+                    <input
+                      className="setting-input"
+                      type="time"
+                      value={startOfDay}
+                      onChange={(event) => setStartOfDay(event.currentTarget.value || DEFAULT_START_OF_DAY)}
+                    />
+                  </SettingBlock>
+                  <SettingBlock label={t.settings.weekStart}>
+                    <SegmentedWeekStart setWeekStart={setWeekStart} t={t} weekStart={weekStart} />
+                  </SettingBlock>
+                </div>
+                <SettingBlock label={t.settings.sampleInterval}>
+                  <SegmentedSampleInterval
+                    onChange={setSampleInterval}
+                    t={t}
+                    value={dashboard.health.sample_interval_ms}
+                  />
+                  <small className="setting-hint">{t.settings.sampleIntervalHint}</small>
+                </SettingBlock>
+                <SettingBlock label={t.settings.alwaysActivePattern}>
+                  <input
+                    className="setting-input"
+                    placeholder="Zoom|Teams|bilibili"
+                    value={alwaysActivePattern}
+                    onBlur={(event) => void saveAlwaysActivePattern(event.currentTarget.value)}
+                    onChange={(event) => setAlwaysActivePattern(event.currentTarget.value)}
+                  />
+                  <small className="setting-hint">{t.settings.alwaysActivePatternHint}</small>
+                </SettingBlock>
+              </div>
+            </Panel>
           </div>
-        </Panel>
+        </div>
 
-        <Panel title={t.panels.storage} action={<HardDrive size={18} />}>
+        <Panel title={t.panels.storage} className="settings-storage-panel" action={<HardDrive size={18} />}>
           <div className="settings-grid">
             <InfoItem label={t.status.storageLocation} value={storageLocationLabel(dashboard.health.storage_location, t)} />
             <InfoItem label={t.status.database} value={dashboard.health.database_path} />

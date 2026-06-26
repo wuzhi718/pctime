@@ -492,7 +492,7 @@ pub fn dashboard(
             MetricCard {
                 label: "Visible time".to_string(),
                 value_seconds: active_seconds,
-                helper: "Elapsed desktop time while at least one window is visible".to_string(),
+                helper: "Window visible time".to_string(),
             },
             MetricCard {
                 label: "Focused time".to_string(),
