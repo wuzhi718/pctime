@@ -8,6 +8,13 @@ use crate::storage;
 use crate::visibility;
 
 pub const IDLE_THRESHOLD_SECONDS: u64 = 300;
+pub const DEFAULT_SAMPLE_INTERVAL_MS: u64 = 5_000;
+pub const MIN_SAMPLE_INTERVAL_MS: u64 = 1_000;
+pub const MAX_SAMPLE_INTERVAL_MS: u64 = 60_000;
+
+pub fn normalize_sample_interval_ms(interval_ms: u64) -> u64 {
+    interval_ms.clamp(MIN_SAMPLE_INTERVAL_MS, MAX_SAMPLE_INTERVAL_MS)
+}
 
 pub fn capture_current(db_path: &Path, duration_ms: u64) -> Result<CaptureStats, String> {
     let captured_at = Local::now().timestamp_millis();

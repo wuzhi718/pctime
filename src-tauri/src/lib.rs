@@ -9,7 +9,7 @@ mod visibility;
 use std::env;
 use std::path::PathBuf;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 use std::thread;
@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager};
 use tauri::WindowEvent;
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_opener::OpenerExt;
 
 const TRAY_SHOW: &str = "tray_show";
@@ -35,15 +35,23 @@ pub struct AppState {
     pub storage_location: String,
     pub close_to_tray: Arc<AtomicBool>,
     pub monitoring: Arc<AtomicBool>,
+    pub sample_interval_ms: Arc<AtomicU64>,
 }
 
-fn start_monitor(db_path: PathBuf, monitoring: Arc<AtomicBool>) {
+fn start_monitor(
+    db_path: PathBuf,
+    monitoring: Arc<AtomicBool>,
+    sample_interval_ms: Arc<AtomicU64>,
+) {
     thread::spawn(move || loop {
+        let interval_ms =
+            sampler::normalize_sample_interval_ms(sample_interval_ms.load(Ordering::Relaxed));
+
         if monitoring.load(Ordering::Relaxed) {
-            let _ = sampler::capture_current(&db_path, 1_000);
+            let _ = sampler::capture_current(&db_path, interval_ms);
         }
 
-        thread::sleep(Duration::from_secs(1));
+        thread::sleep(Duration::from_millis(interval_ms));
     });
 }
 
@@ -98,13 +106,21 @@ pub fn run() {
                 &settings_path,
             )));
             let monitoring = Arc::new(AtomicBool::new(true));
+            let sample_interval_ms = Arc::new(AtomicU64::new(commands::load_sample_interval_ms(
+                &settings_path,
+            )));
 
-            start_monitor(db_path.clone(), Arc::clone(&monitoring));
+            start_monitor(
+                db_path.clone(),
+                Arc::clone(&monitoring),
+                Arc::clone(&sample_interval_ms),
+            );
 
             if let Some(icon) = app.default_window_icon().cloned() {
                 let show = MenuItem::with_id(app, TRAY_SHOW, "显示主界面", true, None::<&str>)?;
                 let settings = MenuItem::with_id(app, TRAY_SETTINGS, "设置", true, None::<&str>)?;
-                let feedback = MenuItem::with_id(app, TRAY_FEEDBACK, "意见反馈", true, None::<&str>)?;
+                let feedback =
+                    MenuItem::with_id(app, TRAY_FEEDBACK, "意见反馈", true, None::<&str>)?;
                 let project = MenuItem::with_id(app, TRAY_PROJECT, "项目主页", true, None::<&str>)?;
                 let separator = PredefinedMenuItem::separator(app)?;
                 let quit = MenuItem::with_id(app, TRAY_QUIT, "退出应用", true, None::<&str>)?;
@@ -140,6 +156,7 @@ pub fn run() {
                 storage_location,
                 close_to_tray,
                 monitoring,
+                sample_interval_ms,
             });
 
             Ok(())
@@ -152,6 +169,8 @@ pub fn run() {
             commands::get_app_version,
             commands::get_close_to_tray,
             commands::set_close_to_tray,
+            commands::get_sample_interval_ms,
+            commands::set_sample_interval_ms,
             commands::get_startup_enabled,
             commands::set_startup_enabled
         ])

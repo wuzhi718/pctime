@@ -10,6 +10,7 @@ use crate::{sampler, storage, AppState};
 #[derive(Default, serde::Deserialize, serde::Serialize)]
 struct UserSettings {
     close_to_tray: Option<bool>,
+    sample_interval_ms: Option<u64>,
 }
 
 #[tauri::command]
@@ -22,6 +23,7 @@ pub fn get_dashboard(
         &state.storage_location,
         state.monitoring.load(Ordering::Relaxed),
         sampler::IDLE_THRESHOLD_SECONDS,
+        state.sample_interval_ms.load(Ordering::Relaxed),
         range,
         sampler::live_windows().unwrap_or_default(),
     )
@@ -29,7 +31,10 @@ pub fn get_dashboard(
 
 #[tauri::command]
 pub fn record_now(state: State<'_, AppState>) -> Result<CaptureStats, String> {
-    sampler::capture_current(&state.db_path, 1_000)
+    sampler::capture_current(
+        &state.db_path,
+        sampler::normalize_sample_interval_ms(state.sample_interval_ms.load(Ordering::Relaxed)),
+    )
 }
 
 #[tauri::command]
@@ -61,6 +66,23 @@ pub fn set_close_to_tray(state: State<'_, AppState>, enabled: bool) -> Result<bo
 }
 
 #[tauri::command]
+pub fn get_sample_interval_ms(state: State<'_, AppState>) -> Result<u64, String> {
+    Ok(sampler::normalize_sample_interval_ms(
+        state.sample_interval_ms.load(Ordering::Relaxed),
+    ))
+}
+
+#[tauri::command]
+pub fn set_sample_interval_ms(state: State<'_, AppState>, interval_ms: u64) -> Result<u64, String> {
+    let normalized = sampler::normalize_sample_interval_ms(interval_ms);
+    state
+        .sample_interval_ms
+        .store(normalized, Ordering::Relaxed);
+    save_sample_interval_ms(&state.settings_path, normalized)?;
+    Ok(normalized)
+}
+
+#[tauri::command]
 pub fn get_startup_enabled() -> Result<bool, String> {
     startup_enabled()
 }
@@ -72,26 +94,42 @@ pub fn set_startup_enabled(enabled: bool) -> Result<bool, String> {
 }
 
 pub fn load_close_to_tray(settings_path: &Path) -> bool {
-    fs::read_to_string(settings_path)
-        .ok()
-        .and_then(|contents| serde_json::from_str::<UserSettings>(&contents).ok())
+    load_settings(settings_path)
         .and_then(|settings| settings.close_to_tray)
         .unwrap_or(true)
 }
 
+pub fn load_sample_interval_ms(settings_path: &Path) -> u64 {
+    load_settings(settings_path)
+        .and_then(|settings| settings.sample_interval_ms)
+        .map(sampler::normalize_sample_interval_ms)
+        .unwrap_or(sampler::DEFAULT_SAMPLE_INTERVAL_MS)
+}
+
 fn save_close_to_tray(settings_path: &Path, enabled: bool) -> Result<(), String> {
+    let mut settings = load_settings(settings_path).unwrap_or_default();
+    settings.close_to_tray = Some(enabled);
+    save_settings(settings_path, &settings)
+}
+
+fn save_sample_interval_ms(settings_path: &Path, interval_ms: u64) -> Result<(), String> {
+    let mut settings = load_settings(settings_path).unwrap_or_default();
+    settings.sample_interval_ms = Some(sampler::normalize_sample_interval_ms(interval_ms));
+    save_settings(settings_path, &settings)
+}
+
+fn load_settings(settings_path: &Path) -> Option<UserSettings> {
+    fs::read_to_string(settings_path)
+        .ok()
+        .and_then(|contents| serde_json::from_str::<UserSettings>(&contents).ok())
+}
+
+fn save_settings(settings_path: &Path, settings: &UserSettings) -> Result<(), String> {
     if let Some(parent) = settings_path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
 
-    let mut settings = fs::read_to_string(settings_path)
-        .ok()
-        .and_then(|contents| serde_json::from_str::<UserSettings>(&contents).ok())
-        .unwrap_or_default();
-
-    settings.close_to_tray = Some(enabled);
-
-    let contents = serde_json::to_string_pretty(&settings).map_err(|error| error.to_string())?;
+    let contents = serde_json::to_string_pretty(settings).map_err(|error| error.to_string())?;
     fs::write(settings_path, contents).map_err(|error| error.to_string())
 }
 
