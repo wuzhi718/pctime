@@ -12,6 +12,13 @@ use crate::models::{
     WindowSummary,
 };
 
+const TRACKABLE_WINDOW_SQL: &str = "
+    NOT (
+        lower(sw.app_name) = 'explorer.exe'
+        AND lower(trim(sw.window_title)) IN ('', 'program manager')
+    )
+";
+
 pub fn init_database(
     install_data_dir: &Path,
     fallback_dir: &Path,
@@ -578,7 +585,7 @@ fn visible_ms(
         SELECT COALESCE(SUM(MAX(0, MIN(s.end_at, ?2) - MAX(s.start_at, ?1))), 0)
         FROM segment_windows sw
         JOIN activity_segments s ON s.id = sw.segment_id
-        WHERE s.end_at > ?1 AND s.start_at < ?2 AND {condition}
+        WHERE s.end_at > ?1 AND s.start_at < ?2 AND {TRACKABLE_WINDOW_SQL} AND {condition}
         "
     );
 
@@ -606,7 +613,7 @@ fn deduped_presence_total_ms(
                 MAX(0, MIN(s.end_at, ?2) - MAX(s.start_at, ?1)) AS overlap_ms
             FROM segment_windows sw
             JOIN activity_segments s ON s.id = sw.segment_id
-            WHERE s.end_at > ?1 AND s.start_at < ?2 AND s.idle = 0
+            WHERE s.end_at > ?1 AND s.start_at < ?2 AND s.idle = 0 AND {TRACKABLE_WINDOW_SQL}
             GROUP BY s.id, presence_key
         )
         "
@@ -640,6 +647,10 @@ fn category_summaries(
                 FROM segment_windows sw
                 JOIN activity_segments s ON s.id = sw.segment_id
                 WHERE s.end_at > ?1 AND s.start_at < ?2 AND s.idle = 0
+                    AND NOT (
+                        lower(sw.app_name) = 'explorer.exe'
+                        AND lower(trim(sw.window_title)) IN ('', 'program manager')
+                    )
                 GROUP BY s.id, sw.category
             )
             GROUP BY category
@@ -691,6 +702,10 @@ fn app_summaries(
                 FROM segment_windows sw
                 JOIN activity_segments s ON s.id = sw.segment_id
                 WHERE s.end_at > ?1 AND s.start_at < ?2 AND s.idle = 0
+                    AND NOT (
+                        lower(sw.app_name) = 'explorer.exe'
+                        AND lower(trim(sw.window_title)) IN ('', 'program manager')
+                    )
                 GROUP BY s.id, sw.app_name, sw.category
             )
             GROUP BY app_name, category
@@ -743,6 +758,10 @@ fn window_summaries(
                 FROM segment_windows sw
                 JOIN activity_segments s ON s.id = sw.segment_id
                 WHERE s.end_at > ?1 AND s.start_at < ?2 AND s.idle = 0
+                    AND NOT (
+                        lower(sw.app_name) = 'explorer.exe'
+                        AND lower(trim(sw.window_title)) IN ('', 'program manager')
+                    )
             )
             GROUP BY app_name, window_title, category
             ORDER BY SUM(overlap_ms) DESC
@@ -785,6 +804,10 @@ fn activity_tracks(
             FROM segment_windows sw
             JOIN activity_segments s ON s.id = sw.segment_id
             WHERE s.end_at > ?1 AND s.start_at < ?2 AND s.idle = 0
+                AND NOT (
+                    lower(sw.app_name) = 'explorer.exe'
+                    AND lower(trim(sw.window_title)) IN ('', 'program manager')
+                )
             GROUP BY s.id, sw.app_name, sw.category
             ORDER BY clipped_start ASC
             ",
@@ -884,6 +907,10 @@ fn bucket_top_apps(
                 FROM segment_windows sw
                 JOIN activity_segments s ON s.id = sw.segment_id
                 WHERE s.end_at > ?1 AND s.start_at < ?2 AND s.idle = 0
+                    AND NOT (
+                        lower(sw.app_name) = 'explorer.exe'
+                        AND lower(trim(sw.window_title)) IN ('', 'program manager')
+                    )
                 GROUP BY s.id, sw.app_name, sw.category
             )
             GROUP BY app_name, category
