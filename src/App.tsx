@@ -340,6 +340,30 @@ const categoryColors: Record<string, string> = {
   Unclassified: "#b45309",
 };
 
+const zhAppNames: Record<string, string> = {
+  "explorer.exe": "文件资源管理器",
+  "chrome.exe": "Google Chrome",
+  "msedge.exe": "Microsoft Edge",
+  "wechatappex.exe": "微信",
+  "weixin.exe": "微信",
+  "codex.exe": "Codex",
+  "chatgpt.exe": "ChatGPT",
+  "clash-verge.exe": "Clash Verge",
+  "nvidia overlay.exe": "NVIDIA Overlay",
+};
+
+const enAppNames: Record<string, string> = {
+  "explorer.exe": "File Explorer",
+  "chrome.exe": "Google Chrome",
+  "msedge.exe": "Microsoft Edge",
+  "wechatappex.exe": "WeChat",
+  "weixin.exe": "WeChat",
+  "codex.exe": "Codex",
+  "chatgpt.exe": "ChatGPT",
+  "clash-verge.exe": "Clash Verge",
+  "nvidia overlay.exe": "NVIDIA Overlay",
+};
+
 const navItems: Array<{ id: ViewId; icon: LucideIcon }> = [
   { id: "overview", icon: BarChart3 },
   { id: "activity", icon: Table2 },
@@ -358,7 +382,7 @@ function App() {
   const [rangePreset, setRangePreset] = useState<RangePreset>(() => readStorage("pctime-range", "day"));
   const [customStart, setCustomStart] = useState(() => toLocalInput(startOfToday()));
   const [customEnd, setCustomEnd] = useState(() => toLocalInput(new Date()));
-  const [appVersion, setAppVersion] = useState("0.1.4");
+  const [appVersion, setAppVersion] = useState("0.1.5");
   const [startupEnabled, setStartupEnabled] = useState<boolean | null>(null);
   const [closeToTray, setCloseToTray] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(true);
@@ -411,7 +435,7 @@ function App() {
   useEffect(() => {
     void appInvoke<string>("get_app_version")
       .then(setAppVersion)
-      .catch(() => setAppVersion("0.1.4"));
+      .catch(() => setAppVersion("0.1.5"));
   }, []);
 
   useEffect(() => {
@@ -457,6 +481,7 @@ function App() {
     return dashboard.apps.filter(
       (app) =>
         app.app_name.toLowerCase().includes(value) ||
+        appLabel(app.app_name, t).toLowerCase().includes(value) ||
         app.category.toLowerCase().includes(value) ||
         categoryLabel(app.category, t).toLowerCase().includes(value),
     );
@@ -885,11 +910,12 @@ function AppBarList({ apps, t }: { apps: AppSummary[]; t: UiCopy }) {
       {apps.map((app) => {
         const width = `${Math.max((app.seconds / maxSeconds) * 100, app.seconds > 0 ? 3 : 0)}%`;
         const style = { "--accent": categoryColor(app.category), "--bar-width": width } as CSSProperties;
+        const label = appLabel(app.app_name, t);
         return (
           <div className="app-bar-row" key={`${app.app_name}-${app.category}`} style={style}>
             <div className="app-bar-head">
               <CategoryPill category={app.category} t={t} />
-              <strong>{app.app_name}</strong>
+              <strong title={app.app_name}>{label}</strong>
               <span>{formatDuration(app.seconds)}</span>
               <em>{formatPercent(app.share)}</em>
             </div>
@@ -914,7 +940,7 @@ function TopAppsVisual({ apps, hideTooltip, showTooltip, t }: { apps: AppSummary
 
 function AppShareDonut({ apps, hideTooltip, showTooltip, t }: { apps: AppSummary[]; t: UiCopy } & TooltipControls) {
   const totalSeconds = Math.max(apps.reduce((sum, app) => sum + app.seconds, 0), 1);
-  const segments = buildAppSegments(apps);
+  const segments = buildAppSegments(apps, t);
 
   return (
     <div className="app-share-card">
@@ -930,7 +956,7 @@ function AppShareDonut({ apps, hideTooltip, showTooltip, t }: { apps: AppSummary
         {apps.slice(0, 5).map((app, index) => (
           <div key={`${app.app_name}-${app.category}-share`}>
             <span style={{ "--accent": appColor(app, index) } as CSSProperties} />
-            <strong>{app.app_name}</strong>
+            <strong title={app.app_name}>{appLabel(app.app_name, t)}</strong>
             <em>{formatPercent(app.seconds / totalSeconds)}</em>
           </div>
         ))}
@@ -1046,7 +1072,7 @@ function Timeline({
 
   const pointLabel = (point: TimelinePoint) => {
     const apps = point.top_apps
-      .map((app) => `${app.app_name} - ${categoryLabel(app.category, t)} - ${formatDuration(app.seconds)}`)
+      .map((app) => `${appLabel(app.app_name, t)} - ${categoryLabel(app.category, t)} - ${formatDuration(app.seconds)}`)
       .join("; ");
     return `${point.hour}. ${t.table.visible}: ${formatDuration(point.active_seconds)}${point.idle_seconds > 0 ? `. ${t.cards["Idle time"][0]}: ${formatDuration(point.idle_seconds)}` : ""}${apps ? `. Top apps: ${apps}` : ""}`;
   };
@@ -1060,7 +1086,7 @@ function Timeline({
       y: event.clientY,
       lines: point.top_apps.map((app) => ({
         color: categoryColor(app.category),
-        label: app.app_name,
+        label: appLabel(app.app_name, t),
         value: `${categoryLabel(app.category, t)} - ${formatDuration(app.seconds)}`,
       })),
     });
@@ -1132,13 +1158,14 @@ function ActivityTracks({
       </div>
       {tracks.map((track, index) => {
         const color = appColor(track, index);
+        const label = appLabel(track.app_name, t);
         const blocks = trackBlocks(track.segments, range, sampleIntervalMs);
 
         return (
           <div className="track-row" key={`${track.app_name}-${track.category}`}>
             <div className="track-label">
               <span style={{ "--track-color": color } as CSSProperties} />
-              <strong>{track.app_name}</strong>
+              <strong title={track.app_name}>{label}</strong>
               <em>{categoryLabel(track.category, t)}</em>
             </div>
             <div className="track-lane">
@@ -1148,7 +1175,7 @@ function ActivityTracks({
                   const rect = target.getBoundingClientRect();
                   showTooltip({
                     color,
-                    title: track.app_name,
+                    title: label,
                     primary: formatDuration(block.seconds),
                     secondary: `${formatTrackPoint(block.start_ms, range.bucket)} - ${formatTrackPoint(block.end_ms, range.bucket)} / ${categoryLabel(track.category, t)}`,
                     x: rect.left + rect.width / 2,
@@ -1217,16 +1244,16 @@ function categoryAppLines(apps: AppSummary[], category: string | null, totalSeco
     .slice(0, 5)
     .map((app, index) => ({
       color: appColor(app, index),
-      label: app.app_name,
+      label: appLabel(app.app_name, t),
       value: `${formatDuration(app.seconds)} - ${formatPercent(totalSeconds > 0 ? app.seconds / totalSeconds : 0)}${category === null ? ` - ${categoryLabel(app.category, t)}` : ""}`,
     }));
 }
 
-function buildAppSegments(apps: AppSummary[]): DonutSegment[] {
+function buildAppSegments(apps: AppSummary[], t: UiCopy): DonutSegment[] {
   const totalSeconds = Math.max(apps.reduce((sum, app) => sum + app.seconds, 0), 1);
   return normalizeSegments(apps.map((app, index) => ({
     key: `${app.app_name}-${app.category}`,
-    label: app.app_name,
+    label: appLabel(app.app_name, t),
     valueLabel: formatDuration(app.seconds),
     shareLabel: formatPercent(app.seconds / totalSeconds),
     color: appColor(app, index),
@@ -1319,16 +1346,19 @@ function AppTable({ apps, t, compact = false }: { apps: AppSummary[]; t: UiCopy;
           </tr>
         </thead>
         <tbody>
-          {apps.map((app) => (
-            <tr key={`${app.app_name}-${app.category}`}>
-              <td><strong>{app.app_name}</strong></td>
-              <td><CategoryPill category={app.category} t={t} /></td>
-              <td>{formatDuration(app.seconds)}</td>
-              <td>{formatDuration(app.focus_seconds)}</td>
-              <td>{formatPercent(app.share)}</td>
-              {!compact ? <td>{app.last_seen ?? "-"}</td> : null}
-            </tr>
-          ))}
+          {apps.map((app) => {
+            const label = appLabel(app.app_name, t);
+            return (
+              <tr key={`${app.app_name}-${app.category}`}>
+                <td><strong title={app.app_name}>{label}</strong></td>
+                <td><CategoryPill category={app.category} t={t} /></td>
+                <td>{formatDuration(app.seconds)}</td>
+                <td>{formatDuration(app.focus_seconds)}</td>
+                <td>{formatPercent(app.share)}</td>
+                {!compact ? <td>{app.last_seen ?? "-"}</td> : null}
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -1414,6 +1444,11 @@ function categoryLabel(category: string, t: UiCopy) {
   return t.categories[category as keyof typeof t.categories] ?? category;
 }
 
+function appLabel(appName: string, t: UiCopy) {
+  const labels = t === copy["zh-CN"] ? zhAppNames : enAppNames;
+  return labels[appName.toLowerCase()] ?? appName;
+}
+
 function storageLocationLabel(location: string, t: UiCopy) {
   return location === "install_dir" ? t.status.installDir : t.status.fallbackDir;
 }
@@ -1462,7 +1497,7 @@ async function appInvoke<T>(command: string, args?: Record<string, unknown>): Pr
 
 function demoResponse(command: string, args?: Record<string, unknown>) {
   if (command === "get_dashboard") return demoDashboard(args?.range as RangePayload | undefined);
-  if (command === "get_app_version") return "0.1.4";
+  if (command === "get_app_version") return "0.1.5";
   if (command === "get_startup_enabled") return false;
   if (command === "set_startup_enabled") return Boolean(args?.enabled);
   if (command === "get_close_to_tray") return true;
