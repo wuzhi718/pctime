@@ -1,14 +1,35 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Datelike, Local, TimeZone};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::classifier;
 use crate::models::{
-    AppSummary, CaptureHealth, CategorySummary, Dashboard, LiveWindow, MetricCard, RangeInfo,
-    RangeQuery, TimelineApp, TimelinePoint, WindowSample, WindowSummary,
+    ActivityTrack, ActivityTrackSegment, AppSummary, CaptureHealth, CategorySummary, Dashboard,
+    LiveWindow, MetricCard, RangeInfo, RangeQuery, TimelineApp, TimelinePoint, WindowSample,
+    WindowSummary,
 };
+
+const TRACKABLE_WINDOW_SQL: &str = "
+    NOT (
+        (
+            lower(sw.app_name) = 'explorer.exe'
+            AND lower(trim(sw.window_title)) IN ('', 'program manager')
+        )
+        OR lower(trim(sw.app_name)) IN (
+            'nvidia overlay',
+            'nvidia overlay.exe',
+            'nvidia share',
+            'nvidia share.exe'
+        )
+        OR (
+            lower(sw.app_name) = 'desktop'
+            AND lower(sw.window_title) = 'no visible tracked windows'
+        )
+    )
+";
 
 pub fn init_database(
     install_data_dir: &Path,
@@ -54,15 +75,100 @@ fn try_init_database(app_dir: &Path) -> Result<PathBuf, Box<dyn std::error::Erro
         CREATE INDEX IF NOT EXISTS idx_samples_captured_at ON samples(captured_at);
         CREATE INDEX IF NOT EXISTS idx_samples_category ON samples(category);
         CREATE INDEX IF NOT EXISTS idx_samples_app ON samples(app_name);
+
+        CREATE TABLE IF NOT EXISTS activity_segments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            start_at INTEGER NOT NULL,
+            end_at INTEGER NOT NULL,
+            duration_ms INTEGER NOT NULL,
+            state_hash TEXT NOT NULL,
+            idle INTEGER NOT NULL,
+            focused_app TEXT NOT NULL,
+            focused_title TEXT NOT NULL,
+            focused_category TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS segment_windows (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            segment_id INTEGER NOT NULL,
+            app_name TEXT NOT NULL,
+            window_title TEXT NOT NULL,
+            process_path TEXT NOT NULL,
+            pid INTEGER NOT NULL,
+            category TEXT NOT NULL,
+            visible_area INTEGER NOT NULL,
+            visible_share REAL NOT NULL,
+            focused INTEGER NOT NULL,
+            FOREIGN KEY(segment_id) REFERENCES activity_segments(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_segments_time ON activity_segments(start_at, end_at);
+        CREATE INDEX IF NOT EXISTS idx_segments_state ON activity_segments(state_hash);
+        CREATE INDEX IF NOT EXISTS idx_segment_windows_segment ON segment_windows(segment_id);
+        CREATE INDEX IF NOT EXISTS idx_segment_windows_category ON segment_windows(category);
+        CREATE INDEX IF NOT EXISTS idx_segment_windows_app ON segment_windows(app_name);
         ",
     )?;
+    migrate_legacy_samples(&conn)?;
 
     Ok(db_path)
 }
 
+fn migrate_legacy_samples(conn: &Connection) -> Result<(), Box<dyn std::error::Error>> {
+    let segment_count: i64 =
+        conn.query_row("SELECT COUNT(*) FROM activity_segments", [], |row| {
+            row.get(0)
+        })?;
+    let sample_count: i64 = conn.query_row("SELECT COUNT(*) FROM samples", [], |row| row.get(0))?;
+
+    if segment_count > 0 || sample_count == 0 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "
+        BEGIN;
+        INSERT INTO activity_segments (
+            start_at, end_at, duration_ms, state_hash, idle,
+            focused_app, focused_title, focused_category
+        )
+        SELECT
+            captured_at,
+            captured_at + MAX(duration_ms),
+            MAX(duration_ms),
+            'legacy-' || captured_at,
+            MAX(idle),
+            COALESCE(MAX(CASE WHEN focused = 1 THEN app_name END), ''),
+            COALESCE(MAX(CASE WHEN focused = 1 THEN window_title END), ''),
+            COALESCE(MAX(CASE WHEN focused = 1 THEN category END), '')
+        FROM samples
+        GROUP BY captured_at;
+
+        INSERT INTO segment_windows (
+            segment_id, app_name, window_title, process_path, pid,
+            category, visible_area, visible_share, focused
+        )
+        SELECT
+            activity_segments.id,
+            samples.app_name,
+            samples.window_title,
+            samples.process_path,
+            samples.pid,
+            samples.category,
+            samples.visible_area,
+            samples.visible_share,
+            samples.focused
+        FROM samples
+        JOIN activity_segments
+            ON activity_segments.state_hash = 'legacy-' || samples.captured_at;
+        COMMIT;
+        ",
+    )?;
+
+    Ok(())
+}
+
 pub fn refresh_unclassified_categories(db_path: &Path) -> Result<(), String> {
     let mut conn = Connection::open(db_path).map_err(|error| error.to_string())?;
-    let candidates = {
+    let sample_candidates = {
         let mut stmt = conn
             .prepare(
                 "
@@ -86,17 +192,63 @@ pub fn refresh_unclassified_categories(db_path: &Path) -> Result<(), String> {
 
         collect_rows(rows)?
     };
+    let segment_candidates = {
+        let mut stmt = conn
+            .prepare(
+                "
+                SELECT id, app_name, window_title, process_path
+                FROM segment_windows
+                WHERE category = 'Unclassified'
+                ",
+            )
+            .map_err(|error| error.to_string())?;
 
-    if candidates.is_empty() {
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+
+        collect_rows(rows)?
+    };
+
+    if sample_candidates.is_empty() && segment_candidates.is_empty() {
         return Ok(());
     }
 
     let tx = conn.transaction().map_err(|error| error.to_string())?;
-    for (id, app_name, window_title, process_path) in candidates {
+    for (id, app_name, window_title, process_path) in sample_candidates {
         let category = classifier::classify(&app_name, &window_title, &process_path);
         if category != "Unclassified" {
             tx.execute(
                 "UPDATE samples SET category = ?1 WHERE id = ?2",
+                params![category, id],
+            )
+            .map_err(|error| error.to_string())?;
+            tx.execute(
+                "
+                UPDATE segment_windows
+                SET category = ?1
+                WHERE category = 'Unclassified'
+                    AND app_name = ?2
+                    AND window_title = ?3
+                    AND process_path = ?4
+                ",
+                params![category, app_name, window_title, process_path],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+    }
+    for (id, app_name, window_title, process_path) in segment_candidates {
+        let category = classifier::classify(&app_name, &window_title, &process_path);
+        if category != "Unclassified" {
+            tx.execute(
+                "UPDATE segment_windows SET category = ?1 WHERE id = ?2",
                 params![category, id],
             )
             .map_err(|error| error.to_string())?;
@@ -116,51 +268,96 @@ pub fn insert_samples(
 ) -> Result<(), String> {
     let mut conn = Connection::open(db_path).map_err(|error| error.to_string())?;
     let tx = conn.transaction().map_err(|error| error.to_string())?;
+    let duration_ms = duration_ms as i64;
+    let end_at = captured_at + duration_ms;
+    let state_hash = segment_state_hash(idle, samples);
+    let merge_gap_ms = (duration_ms * 2).max(5_000);
 
-    if idle {
-        tx.execute(
+    let previous = tx
+        .query_row(
             "
-            INSERT INTO samples (
-                captured_at, duration_ms, app_name, window_title, process_path, pid,
-                category, visible_area, visible_share, weighted_ms, focused, focus_ms, idle
-            )
-            VALUES (?1, ?2, 'Idle', 'Away from keyboard', '', 0, 'Idle', 0, 1.0, ?2, 0, 0, 1)
+            SELECT id, end_at, state_hash
+            FROM activity_segments
+            ORDER BY end_at DESC, id DESC
+            LIMIT 1
             ",
-            params![captured_at, duration_ms as i64],
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
         )
+        .optional()
         .map_err(|error| error.to_string())?;
-    } else if samples.is_empty() {
-        tx.execute(
-            "
-            INSERT INTO samples (
-                captured_at, duration_ms, app_name, window_title, process_path, pid,
-                category, visible_area, visible_share, weighted_ms, focused, focus_ms, idle
-            )
-            VALUES (?1, ?2, 'Desktop', 'No visible tracked windows', '', 0, 'System', 0, 1.0, ?2, 0, 0, 0)
-            ",
-            params![captured_at, duration_ms as i64],
-        )
-        .map_err(|error| error.to_string())?;
-    } else {
-        for sample in samples {
-            let weighted_ms = (duration_ms as f64 * sample.visible_share).round() as i64;
-            let focus_ms = if sample.focused {
-                duration_ms as i64
-            } else {
-                0
-            };
 
+    if let Some((segment_id, previous_end_at, previous_hash)) = previous {
+        let gap_ms = captured_at - previous_end_at;
+        if previous_hash == state_hash && gap_ms >= -merge_gap_ms && gap_ms <= merge_gap_ms {
             tx.execute(
                 "
-                INSERT INTO samples (
-                    captured_at, duration_ms, app_name, window_title, process_path, pid,
-                    category, visible_area, visible_share, weighted_ms, focused, focus_ms, idle
+                UPDATE activity_segments
+                SET end_at = MAX(end_at, ?1),
+                    duration_ms = MAX(end_at, ?1) - start_at
+                WHERE id = ?2
+                ",
+                params![end_at, segment_id],
+            )
+            .map_err(|error| error.to_string())?;
+            tx.commit().map_err(|error| error.to_string())?;
+            return Ok(());
+        }
+    }
+
+    let (focused_app, focused_title, focused_category) = focused_window(samples);
+    tx.execute(
+        "
+        INSERT INTO activity_segments (
+            start_at, end_at, duration_ms, state_hash, idle,
+            focused_app, focused_title, focused_category
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        ",
+        params![
+            captured_at,
+            end_at,
+            duration_ms,
+            state_hash,
+            i64::from(idle),
+            focused_app,
+            focused_title,
+            focused_category,
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+
+    let segment_id = tx.last_insert_rowid();
+    if !idle && samples.is_empty() {
+        tx.execute(
+            "
+            INSERT INTO segment_windows (
+                segment_id, app_name, window_title, process_path, pid,
+                category, visible_area, visible_share, focused
+            )
+            VALUES (?1, 'Desktop', 'No visible tracked windows', '', 0, 'System', 0, 1.0, 0)
+            ",
+            params![segment_id],
+        )
+        .map_err(|error| error.to_string())?;
+    } else if !idle {
+        for sample in samples {
+            tx.execute(
+                "
+                INSERT INTO segment_windows (
+                    segment_id, app_name, window_title, process_path, pid,
+                    category, visible_area, visible_share, focused
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                 ",
                 params![
-                    captured_at,
-                    duration_ms as i64,
+                    segment_id,
                     sample.app_name,
                     sample.window_title,
                     sample.process_path,
@@ -168,9 +365,7 @@ pub fn insert_samples(
                     sample.category,
                     sample.visible_area,
                     sample.visible_share,
-                    weighted_ms,
                     i64::from(sample.focused),
-                    focus_ms,
                 ],
             )
             .map_err(|error| error.to_string())?;
@@ -180,11 +375,53 @@ pub fn insert_samples(
     tx.commit().map_err(|error| error.to_string())
 }
 
+fn segment_state_hash(idle: bool, samples: &[WindowSample]) -> String {
+    if idle {
+        return "idle".to_string();
+    }
+
+    if samples.is_empty() {
+        return "active:desktop".to_string();
+    }
+
+    let mut parts = samples
+        .iter()
+        .map(|sample| {
+            format!(
+                "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+                sample.app_name,
+                sample.window_title,
+                sample.process_path,
+                sample.category,
+                sample.focused
+            )
+        })
+        .collect::<Vec<_>>();
+    parts.sort();
+
+    format!("active:{}", parts.join("\u{1e}"))
+}
+
+fn focused_window(samples: &[WindowSample]) -> (&str, &str, &str) {
+    samples
+        .iter()
+        .find(|sample| sample.focused)
+        .map(|sample| {
+            (
+                sample.app_name.as_str(),
+                sample.window_title.as_str(),
+                sample.category.as_str(),
+            )
+        })
+        .unwrap_or(("", "", ""))
+}
+
 pub fn dashboard(
     db_path: &Path,
     storage_location: &str,
     monitoring: bool,
     idle_threshold_seconds: u64,
+    sample_interval_ms: u64,
     range_query: Option<RangeQuery>,
     live_windows: Vec<LiveWindow>,
 ) -> Result<Dashboard, String> {
@@ -192,38 +429,60 @@ pub fn dashboard(
     let range = resolve_range(range_query);
     let start_ms = range.start_ms;
     let end_ms = range.end_ms;
-    let active_ms = sum_ms(&conn, start_ms, end_ms, "idle = 0")?;
-    let idle_ms = sum_ms(&conn, start_ms, end_ms, "idle = 1")?;
-    let focus_ms: i64 = conn
-        .query_row(
-            "SELECT COALESCE(SUM(focus_ms), 0) FROM samples WHERE captured_at >= ?1 AND captured_at < ?2 AND idle = 0",
-            params![start_ms, end_ms],
-            |row| row.get(0),
-        )
-        .map_err(|error| error.to_string())?;
-    let unclassified_ms: i64 = conn
-        .query_row(
-            "SELECT COALESCE(SUM(weighted_ms), 0) FROM samples WHERE captured_at >= ?1 AND captured_at < ?2 AND category = 'Unclassified'",
-            params![start_ms, end_ms],
-            |row| row.get(0),
-        )
-        .map_err(|error| error.to_string())?;
+    let active_ms = active_visible_ms(&conn, start_ms, end_ms)?;
+    let idle_ms = segment_sum_ms(&conn, start_ms, end_ms, "idle = 1")?;
+    let focus_ms = focused_visible_ms(&conn, start_ms, end_ms)?;
+    let unclassified_ms = visible_ms(
+        &conn,
+        start_ms,
+        end_ms,
+        "s.idle = 0 AND sw.category = 'Unclassified'",
+    )?;
+    let category_visible_ms = deduped_presence_total_ms(&conn, start_ms, end_ms, "sw.category")?;
+    let app_visible_ms = deduped_presence_total_ms(
+        &conn,
+        start_ms,
+        end_ms,
+        "sw.app_name || char(31) || sw.category",
+    )?;
 
     let (today_start_ms, today_end_ms) = today_range_ms();
     let samples_today: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM samples WHERE captured_at >= ?1 AND captured_at < ?2",
+            "
+            SELECT COUNT(*)
+            FROM activity_segments
+            WHERE end_at > ?1 AND start_at < ?2
+            ",
+            params![today_start_ms, today_end_ms],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let window_rows_today: i64 = conn
+        .query_row(
+            "
+            SELECT COUNT(*)
+            FROM segment_windows sw
+            JOIN activity_segments s ON s.id = sw.segment_id
+            WHERE s.end_at > ?1 AND s.start_at < ?2
+            ",
             params![today_start_ms, today_end_ms],
             |row| row.get(0),
         )
         .map_err(|error| error.to_string())?;
 
-    let total_rows: i64 = conn
-        .query_row("SELECT COUNT(*) FROM samples", [], |row| row.get(0))
+    let segment_rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM activity_segments", [], |row| {
+            row.get(0)
+        })
         .map_err(|error| error.to_string())?;
+    let window_rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM segment_windows", [], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    let total_rows = segment_rows + window_rows;
 
     let last_capture_at: Option<i64> = conn
-        .query_row("SELECT MAX(captured_at) FROM samples", [], |row| {
+        .query_row("SELECT MAX(end_at) FROM activity_segments", [], |row| {
             row.get::<_, Option<i64>>(0)
         })
         .map_err(|error| error.to_string())?;
@@ -245,7 +504,7 @@ pub fn dashboard(
             MetricCard {
                 label: "Visible time".to_string(),
                 value_seconds: active_seconds,
-                helper: "Split-screen time is weighted by visible area".to_string(),
+                helper: "Window visible time".to_string(),
             },
             MetricCard {
                 label: "Focused time".to_string(),
@@ -263,22 +522,27 @@ pub fn dashboard(
                 helper: "Unclassified visible time".to_string(),
             },
         ],
-        categories: category_summaries(&conn, start_ms, end_ms, active_ms)?,
-        apps: app_summaries(&conn, start_ms, end_ms, active_ms)?,
-        windows: window_summaries(&conn, start_ms, end_ms, active_ms)?,
+        categories: category_summaries(&conn, start_ms, end_ms, category_visible_ms)?,
+        apps: app_summaries(&conn, start_ms, end_ms, app_visible_ms)?,
+        windows: window_summaries(&conn, start_ms, end_ms)?,
         timeline: timeline_points,
+        tracks: activity_tracks(&conn, start_ms, end_ms)?,
         live_windows,
         health: CaptureHealth {
             monitoring,
             database_path: db_path.display().to_string(),
             storage_location: storage_location.to_string(),
             database_size_bytes: database_size_bytes(db_path),
-            estimated_daily_bytes: estimated_daily_bytes(db_path, total_rows, samples_today),
+            estimated_daily_bytes: estimated_daily_bytes(
+                db_path,
+                total_rows,
+                samples_today + window_rows_today,
+            ),
             total_rows,
             samples_today,
             last_capture_at: last_capture_at.map(format_timestamp),
             idle_threshold_seconds,
-            sample_interval_ms: 1_000,
+            sample_interval_ms,
         },
     })
 }
@@ -304,9 +568,87 @@ fn estimated_daily_bytes(db_path: &Path, total_rows: i64, samples_today: i64) ->
     (bytes_per_row * samples_today as f64).round() as u64
 }
 
-fn sum_ms(conn: &Connection, start_ms: i64, end_ms: i64, condition: &str) -> Result<i64, String> {
+fn segment_sum_ms(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+    condition: &str,
+) -> Result<i64, String> {
     let sql = format!(
-        "SELECT COALESCE(SUM(weighted_ms), 0) FROM samples WHERE captured_at >= ?1 AND captured_at < ?2 AND {condition}"
+        "
+        SELECT COALESCE(SUM(MAX(0, MIN(end_at, ?2) - MAX(start_at, ?1))), 0)
+        FROM activity_segments
+        WHERE end_at > ?1 AND start_at < ?2 AND {condition}
+        "
+    );
+
+    conn.query_row(&sql, params![start_ms, end_ms], |row| row.get(0))
+        .map_err(|error| error.to_string())
+}
+
+fn active_visible_ms(conn: &Connection, start_ms: i64, end_ms: i64) -> Result<i64, String> {
+    let sql = format!(
+        "
+        SELECT COALESCE(SUM(overlap_ms), 0)
+        FROM (
+            SELECT
+                s.id,
+                MAX(0, MIN(s.end_at, ?2) - MAX(s.start_at, ?1)) AS overlap_ms
+            FROM segment_windows sw
+            JOIN activity_segments s ON s.id = sw.segment_id
+            WHERE s.end_at > ?1 AND s.start_at < ?2 AND s.idle = 0 AND {TRACKABLE_WINDOW_SQL}
+            GROUP BY s.id
+        )
+        "
+    );
+
+    conn.query_row(&sql, params![start_ms, end_ms], |row| row.get(0))
+        .map_err(|error| error.to_string())
+}
+
+fn visible_ms(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+    condition: &str,
+) -> Result<i64, String> {
+    let sql = format!(
+        "
+        SELECT COALESCE(SUM(MAX(0, MIN(s.end_at, ?2) - MAX(s.start_at, ?1))), 0)
+        FROM segment_windows sw
+        JOIN activity_segments s ON s.id = sw.segment_id
+        WHERE s.end_at > ?1 AND s.start_at < ?2 AND {TRACKABLE_WINDOW_SQL} AND {condition}
+        "
+    );
+
+    conn.query_row(&sql, params![start_ms, end_ms], |row| row.get(0))
+        .map_err(|error| error.to_string())
+}
+
+fn focused_visible_ms(conn: &Connection, start_ms: i64, end_ms: i64) -> Result<i64, String> {
+    visible_ms(conn, start_ms, end_ms, "s.idle = 0 AND sw.focused = 1")
+}
+
+fn deduped_presence_total_ms(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+    key_sql: &str,
+) -> Result<i64, String> {
+    let sql = format!(
+        "
+        SELECT COALESCE(SUM(overlap_ms), 0)
+        FROM (
+            SELECT
+                s.id,
+                {key_sql} AS presence_key,
+                MAX(0, MIN(s.end_at, ?2) - MAX(s.start_at, ?1)) AS overlap_ms
+            FROM segment_windows sw
+            JOIN activity_segments s ON s.id = sw.segment_id
+            WHERE s.end_at > ?1 AND s.start_at < ?2 AND s.idle = 0 AND {TRACKABLE_WINDOW_SQL}
+            GROUP BY s.id, presence_key
+        )
+        "
     );
 
     conn.query_row(&sql, params![start_ms, end_ms], |row| row.get(0))
@@ -317,20 +659,34 @@ fn category_summaries(
     conn: &Connection,
     start_ms: i64,
     end_ms: i64,
-    active_ms: i64,
+    total_ms: i64,
 ) -> Result<Vec<CategorySummary>, String> {
-    let mut stmt = conn
-        .prepare(
-            "
-            SELECT category, SUM(weighted_ms), SUM(focus_ms), COUNT(*)
-            FROM samples
-            WHERE captured_at >= ?1 AND captured_at < ?2 AND idle = 0
+    let sql = format!(
+        "
+            SELECT category, SUM(overlap_ms), SUM(focus_ms), COUNT(*)
+            FROM (
+                SELECT
+                    s.id,
+                    sw.category,
+                    MAX(0, MIN(s.end_at, ?2) - MAX(s.start_at, ?1)) AS overlap_ms,
+                    MAX(
+                        CASE WHEN sw.focused = 1
+                            THEN MAX(0, MIN(s.end_at, ?2) - MAX(s.start_at, ?1))
+                            ELSE 0
+                        END
+                    ) AS focus_ms
+                FROM segment_windows sw
+                JOIN activity_segments s ON s.id = sw.segment_id
+                WHERE s.end_at > ?1 AND s.start_at < ?2 AND s.idle = 0
+                    AND {TRACKABLE_WINDOW_SQL}
+                GROUP BY s.id, sw.category
+            )
             GROUP BY category
-            ORDER BY SUM(weighted_ms) DESC
+            ORDER BY SUM(overlap_ms) DESC
             LIMIT 12
-            ",
-        )
-        .map_err(|error| error.to_string())?;
+            "
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
 
     let rows = stmt
         .query_map(params![start_ms, end_ms], |row| {
@@ -339,7 +695,7 @@ fn category_summaries(
                 category: row.get(0)?,
                 seconds: ms / 1_000,
                 focus_seconds: row.get::<_, i64>(2)? / 1_000,
-                share: share(ms, active_ms),
+                share: share(ms, total_ms),
                 sample_count: row.get(3)?,
             })
         })
@@ -352,20 +708,36 @@ fn app_summaries(
     conn: &Connection,
     start_ms: i64,
     end_ms: i64,
-    active_ms: i64,
+    total_ms: i64,
 ) -> Result<Vec<AppSummary>, String> {
-    let mut stmt = conn
-        .prepare(
-            "
-            SELECT app_name, category, SUM(weighted_ms), SUM(focus_ms), MAX(captured_at)
-            FROM samples
-            WHERE captured_at >= ?1 AND captured_at < ?2 AND idle = 0
+    let sql = format!(
+        "
+            SELECT app_name, category, SUM(overlap_ms), SUM(focus_ms), MAX(last_seen)
+            FROM (
+                SELECT
+                    s.id,
+                    sw.app_name,
+                    sw.category,
+                    MAX(0, MIN(s.end_at, ?2) - MAX(s.start_at, ?1)) AS overlap_ms,
+                    MAX(
+                        CASE WHEN sw.focused = 1
+                            THEN MAX(0, MIN(s.end_at, ?2) - MAX(s.start_at, ?1))
+                            ELSE 0
+                        END
+                    ) AS focus_ms,
+                    MAX(s.end_at) AS last_seen
+                FROM segment_windows sw
+                JOIN activity_segments s ON s.id = sw.segment_id
+                WHERE s.end_at > ?1 AND s.start_at < ?2 AND s.idle = 0
+                    AND {TRACKABLE_WINDOW_SQL}
+                GROUP BY s.id, sw.app_name, sw.category
+            )
             GROUP BY app_name, category
-            ORDER BY SUM(weighted_ms) DESC
+            ORDER BY SUM(overlap_ms) DESC
             LIMIT 16
-            ",
-        )
-        .map_err(|error| error.to_string())?;
+            "
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
 
     let rows = stmt
         .query_map(params![start_ms, end_ms], |row| {
@@ -377,7 +749,7 @@ fn app_summaries(
                 category: row.get(1)?,
                 seconds: ms / 1_000,
                 focus_seconds: row.get::<_, i64>(3)? / 1_000,
-                share: share(ms, active_ms),
+                share: share(ms, total_ms),
                 last_seen: last_seen.map(format_timestamp),
             })
         })
@@ -390,20 +762,33 @@ fn window_summaries(
     conn: &Connection,
     start_ms: i64,
     end_ms: i64,
-    active_ms: i64,
 ) -> Result<Vec<WindowSummary>, String> {
-    let mut stmt = conn
-        .prepare(
-            "
-            SELECT app_name, window_title, category, SUM(weighted_ms), SUM(focus_ms)
-            FROM samples
-            WHERE captured_at >= ?1 AND captured_at < ?2 AND idle = 0
+    let total_ms = visible_ms(conn, start_ms, end_ms, "s.idle = 0")?;
+    let sql = format!(
+        "
+            SELECT app_name, window_title, category, SUM(overlap_ms), SUM(focus_ms)
+            FROM (
+                SELECT
+                    s.id,
+                    sw.app_name,
+                    sw.window_title,
+                    sw.category,
+                    MAX(0, MIN(s.end_at, ?2) - MAX(s.start_at, ?1)) AS overlap_ms,
+                    CASE WHEN sw.focused = 1
+                        THEN MAX(0, MIN(s.end_at, ?2) - MAX(s.start_at, ?1))
+                        ELSE 0
+                    END AS focus_ms
+                FROM segment_windows sw
+                JOIN activity_segments s ON s.id = sw.segment_id
+                WHERE s.end_at > ?1 AND s.start_at < ?2 AND s.idle = 0
+                    AND {TRACKABLE_WINDOW_SQL}
+            )
             GROUP BY app_name, window_title, category
-            ORDER BY SUM(weighted_ms) DESC
+            ORDER BY SUM(overlap_ms) DESC
             LIMIT 12
-            ",
-        )
-        .map_err(|error| error.to_string())?;
+            "
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
 
     let rows = stmt
         .query_map(params![start_ms, end_ms], |row| {
@@ -414,12 +799,89 @@ fn window_summaries(
                 category: row.get(2)?,
                 seconds: ms / 1_000,
                 focus_seconds: row.get::<_, i64>(4)? / 1_000,
-                share: share(ms, active_ms),
+                share: share(ms, total_ms),
             })
         })
         .map_err(|error| error.to_string())?;
 
     collect_rows(rows)
+}
+
+fn activity_tracks(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+) -> Result<Vec<ActivityTrack>, String> {
+    let sql = format!(
+        "
+            SELECT
+                sw.app_name,
+                sw.category,
+                MAX(s.start_at, ?1) AS clipped_start,
+                MIN(s.end_at, ?2) AS clipped_end,
+                MAX(0, MIN(s.end_at, ?2) - MAX(s.start_at, ?1)) AS overlap_ms
+            FROM segment_windows sw
+            JOIN activity_segments s ON s.id = sw.segment_id
+            WHERE s.end_at > ?1 AND s.start_at < ?2 AND s.idle = 0
+                AND {TRACKABLE_WINDOW_SQL}
+            GROUP BY s.id, sw.app_name, sw.category
+            ORDER BY clipped_start ASC
+            "
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
+
+    let rows = stmt
+        .query_map(params![start_ms, end_ms], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+
+    let mut builders: BTreeMap<String, ActivityTrack> = BTreeMap::new();
+
+    for row in collect_rows(rows)? {
+        let (app_name, category, clipped_start, clipped_end, overlap_ms) = row;
+        if overlap_ms <= 0 {
+            continue;
+        }
+
+        let key = format!("{app_name}\u{1f}{category}");
+        let track = builders.entry(key).or_insert_with(|| ActivityTrack {
+            app_name,
+            category,
+            seconds: 0,
+            segments: Vec::new(),
+        });
+        track.seconds += overlap_ms / 1_000;
+
+        if let Some(last) = track.segments.last_mut() {
+            if clipped_start <= last.end_ms + 1 {
+                last.end_ms = last.end_ms.max(clipped_end);
+                last.seconds = (last.end_ms - last.start_ms).max(0) / 1_000;
+                continue;
+            }
+        }
+
+        track.segments.push(ActivityTrackSegment {
+            start_ms: clipped_start,
+            end_ms: clipped_end,
+            seconds: overlap_ms / 1_000,
+        });
+    }
+
+    let mut tracks = builders.into_values().collect::<Vec<_>>();
+    for track in &mut tracks {
+        track.segments.sort_by_key(|segment| segment.start_ms);
+    }
+    tracks.sort_by(|left, right| right.seconds.cmp(&left.seconds));
+    tracks.truncate(8);
+
+    Ok(tracks)
 }
 
 fn timeline(
@@ -433,8 +895,8 @@ fn timeline(
     for (label, bucket_start_ms, bucket_end_ms) in timeline_buckets(start_ms, end_ms, bucket)? {
         points.push(TimelinePoint {
             hour: label,
-            active_seconds: sum_ms(conn, bucket_start_ms, bucket_end_ms, "idle = 0")? / 1_000,
-            idle_seconds: sum_ms(conn, bucket_start_ms, bucket_end_ms, "idle = 1")? / 1_000,
+            active_seconds: active_visible_ms(conn, bucket_start_ms, bucket_end_ms)? / 1_000,
+            idle_seconds: segment_sum_ms(conn, bucket_start_ms, bucket_end_ms, "idle = 1")? / 1_000,
             top_apps: bucket_top_apps(conn, bucket_start_ms, bucket_end_ms)?,
         });
     }
@@ -447,18 +909,27 @@ fn bucket_top_apps(
     start_ms: i64,
     end_ms: i64,
 ) -> Result<Vec<TimelineApp>, String> {
-    let mut stmt = conn
-        .prepare(
-            "
-            SELECT app_name, category, SUM(weighted_ms)
-            FROM samples
-            WHERE captured_at >= ?1 AND captured_at < ?2 AND idle = 0
+    let sql = format!(
+        "
+            SELECT app_name, category, SUM(overlap_ms)
+            FROM (
+                SELECT
+                    s.id,
+                    sw.app_name,
+                    sw.category,
+                    MAX(0, MIN(s.end_at, ?2) - MAX(s.start_at, ?1)) AS overlap_ms
+                FROM segment_windows sw
+                JOIN activity_segments s ON s.id = sw.segment_id
+                WHERE s.end_at > ?1 AND s.start_at < ?2 AND s.idle = 0
+                    AND {TRACKABLE_WINDOW_SQL}
+                GROUP BY s.id, sw.app_name, sw.category
+            )
             GROUP BY app_name, category
-            ORDER BY SUM(weighted_ms) DESC
+            ORDER BY SUM(overlap_ms) DESC
             LIMIT 3
-            ",
-        )
-        .map_err(|error| error.to_string())?;
+            "
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
 
     let rows = stmt
         .query_map(params![start_ms, end_ms], |row| {
@@ -498,6 +969,15 @@ fn today_range_ms() -> (i64, i64) {
 
 fn resolve_range(query: Option<RangeQuery>) -> RangeInfo {
     let now = Local::now();
+    let start_of_day_minutes = query
+        .as_ref()
+        .and_then(|value| value.start_of_day_minutes)
+        .map(normalize_start_of_day_minutes)
+        .unwrap_or(240);
+    let week_start = query
+        .as_ref()
+        .and_then(|value| value.week_start.as_deref())
+        .unwrap_or("monday");
     let requested = query
         .as_ref()
         .map(|value| value.preset.clone())
@@ -526,22 +1006,27 @@ fn resolve_range(query: Option<RangeQuery>) -> RangeInfo {
 
     let (preset, start, end, bucket) = match requested.as_str() {
         "week" => {
-            let today = start_of_day(now);
-            let start = today - chrono::Duration::days(now.weekday().num_days_from_monday() as i64);
+            let today = start_of_configured_day(now, start_of_day_minutes);
+            let days_since_start = match week_start {
+                "sunday" => today.weekday().num_days_from_sunday() as i64,
+                _ => today.weekday().num_days_from_monday() as i64,
+            };
+            let start = today - chrono::Duration::days(days_since_start);
             ("week", start, start + chrono::Duration::days(7), "day")
         }
         "month" => {
-            let start = local_date(now.year(), now.month(), 1);
+            let start = start_of_configured_month(now, start_of_day_minutes);
             let end = add_month(start);
             ("month", start, end, "day")
         }
         "year" => {
-            let start = local_date(now.year(), 1, 1);
-            let end = local_date(now.year() + 1, 1, 1);
+            let start = start_of_configured_year(now, start_of_day_minutes);
+            let end = local_date(start.year() + 1, 1, 1)
+                + chrono::Duration::minutes(start_of_day_minutes);
             ("year", start, end, "month")
         }
         _ => {
-            let start = start_of_day(now);
+            let start = start_of_configured_day(now, start_of_day_minutes);
             ("day", start, start + chrono::Duration::days(1), "hour")
         }
     };
@@ -612,6 +1097,42 @@ fn start_of_day(dt: DateTime<Local>) -> DateTime<Local> {
     local_date(dt.year(), dt.month(), dt.day())
 }
 
+fn start_of_configured_day(dt: DateTime<Local>, start_minutes: i64) -> DateTime<Local> {
+    let boundary = start_of_day(dt) + chrono::Duration::minutes(start_minutes);
+    if dt < boundary {
+        boundary - chrono::Duration::days(1)
+    } else {
+        boundary
+    }
+}
+
+fn start_of_configured_month(dt: DateTime<Local>, start_minutes: i64) -> DateTime<Local> {
+    let boundary = local_date(dt.year(), dt.month(), 1) + chrono::Duration::minutes(start_minutes);
+    if dt >= boundary {
+        return boundary;
+    }
+
+    let (year, month) = if dt.month() == 1 {
+        (dt.year() - 1, 12)
+    } else {
+        (dt.year(), dt.month() - 1)
+    };
+    local_date(year, month, 1) + chrono::Duration::minutes(start_minutes)
+}
+
+fn start_of_configured_year(dt: DateTime<Local>, start_minutes: i64) -> DateTime<Local> {
+    let boundary = local_date(dt.year(), 1, 1) + chrono::Duration::minutes(start_minutes);
+    if dt < boundary {
+        local_date(dt.year() - 1, 1, 1) + chrono::Duration::minutes(start_minutes)
+    } else {
+        boundary
+    }
+}
+
+fn normalize_start_of_day_minutes(minutes: i64) -> i64 {
+    minutes.clamp(0, 23 * 60 + 59)
+}
+
 fn local_date(year: i32, month: u32, day: u32) -> DateTime<Local> {
     Local
         .with_ymd_and_hms(year, month, day, 0, 0, 0)
@@ -627,7 +1148,11 @@ fn add_month(dt: DateTime<Local>) -> DateTime<Local> {
 
 fn range_label(preset: &str, start: DateTime<Local>, end: DateTime<Local>) -> String {
     match preset {
-        "week" => format!("{} - {}", start.format("%Y-%m-%d"), (end - chrono::Duration::days(1)).format("%Y-%m-%d")),
+        "week" => format!(
+            "{} - {}",
+            start.format("%Y-%m-%d"),
+            (end - chrono::Duration::days(1)).format("%Y-%m-%d")
+        ),
         "month" => start.format("%Y-%m").to_string(),
         "year" => start.format("%Y").to_string(),
         _ => start.format("%Y-%m-%d").to_string(),
@@ -645,4 +1170,177 @@ fn format_range_boundary(timestamp_ms: i64) -> String {
 fn format_timestamp(timestamp_ms: i64) -> String {
     let dt: DateTime<Local> = Local.timestamp_millis_opt(timestamp_ms).single().unwrap();
     dt.format("%m-%d %H:%M").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+    use crate::models::{Rect, WindowSample};
+
+    #[test]
+    fn merges_unchanged_desktop_state_and_counts_parallel_app_tracks() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("pctime-storage-test-{unique}"));
+        let (db_path, _) = init_database(&root, &root).unwrap();
+        let start_ms = 1_800_000_000_000_i64;
+        let duration_ms = 600_000_u64;
+        let samples = vec![
+            test_sample("Codex.exe", "PCTime", "Development", true),
+            test_sample("chrome.exe", "Docs", "Research", false),
+        ];
+
+        insert_samples(&db_path, start_ms, duration_ms, false, 0, &samples).unwrap();
+        insert_samples(
+            &db_path,
+            start_ms + duration_ms as i64,
+            duration_ms,
+            false,
+            0,
+            &samples,
+        )
+        .unwrap();
+
+        let dashboard = dashboard(
+            &db_path,
+            "install_dir",
+            true,
+            300,
+            1_000,
+            Some(RangeQuery {
+                preset: "custom".to_string(),
+                start_ms: Some(start_ms),
+                end_ms: Some(start_ms + duration_ms as i64 * 2),
+                start_of_day_minutes: None,
+                week_start: None,
+            }),
+            Vec::new(),
+        )
+        .unwrap();
+        let segment_rows: i64 = Connection::open(&db_path)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM activity_segments", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+
+        assert_eq!(segment_rows, 1);
+        assert_eq!(dashboard.active_seconds, 1_200);
+        assert_eq!(
+            dashboard
+                .apps
+                .iter()
+                .find(|app| app.app_name == "Codex.exe")
+                .unwrap()
+                .seconds,
+            1_200
+        );
+        assert_eq!(
+            dashboard
+                .apps
+                .iter()
+                .find(|app| app.app_name == "chrome.exe")
+                .unwrap()
+                .seconds,
+            1_200
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn filters_ignored_overlay_windows_from_dashboard_totals() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("pctime-overlay-filter-test-{unique}"));
+        let (db_path, _) = init_database(&root, &root).unwrap();
+        let start_ms = 1_800_000_000_000_i64;
+        let duration_ms = 600_000_u64;
+
+        let overlay = test_sample(
+            "NVIDIA Overlay.exe",
+            "NVIDIA Overlay",
+            "Unclassified",
+            false,
+        );
+        insert_samples(&db_path, start_ms, duration_ms, false, 0, &[overlay]).unwrap();
+
+        let samples = vec![
+            test_sample("Codex.exe", "PCTime", "Development", true),
+            test_sample(
+                "NVIDIA Overlay.exe",
+                "NVIDIA Overlay",
+                "Unclassified",
+                false,
+            ),
+        ];
+        insert_samples(
+            &db_path,
+            start_ms + duration_ms as i64,
+            duration_ms,
+            false,
+            0,
+            &samples,
+        )
+        .unwrap();
+
+        let dashboard = dashboard(
+            &db_path,
+            "install_dir",
+            true,
+            300,
+            1_000,
+            Some(RangeQuery {
+                preset: "custom".to_string(),
+                start_ms: Some(start_ms),
+                end_ms: Some(start_ms + duration_ms as i64 * 2),
+                start_of_day_minutes: None,
+                week_start: None,
+            }),
+            Vec::new(),
+        )
+        .unwrap();
+
+        assert_eq!(dashboard.active_seconds, 600);
+        assert!(dashboard
+            .apps
+            .iter()
+            .all(|app| app.app_name != "NVIDIA Overlay.exe"));
+        assert_eq!(
+            dashboard
+                .apps
+                .iter()
+                .find(|app| app.app_name == "Codex.exe")
+                .unwrap()
+                .seconds,
+            600
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn test_sample(app_name: &str, title: &str, category: &str, focused: bool) -> WindowSample {
+        WindowSample {
+            app_name: app_name.to_string(),
+            window_title: title.to_string(),
+            process_path: String::new(),
+            pid: 1,
+            rect: Rect {
+                left: 0,
+                top: 0,
+                right: 100,
+                bottom: 100,
+            },
+            category: category.to_string(),
+            visible_area: 10_000,
+            visible_share: 0.5,
+            focused,
+        }
+    }
 }

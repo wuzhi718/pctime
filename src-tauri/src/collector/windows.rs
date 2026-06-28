@@ -12,8 +12,9 @@ use ::windows::Win32::System::Threading::{
 };
 use ::windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use ::windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetTopWindow, GetWindow, GetWindowRect, GetWindowTextLengthW,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, GW_HWNDNEXT,
+    GetClassNameW, GetForegroundWindow, GetTopWindow, GetWindow, GetWindowRect,
+    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+    GW_HWNDNEXT,
 };
 
 pub fn collect_windows() -> Result<Vec<RawWindow>, String> {
@@ -66,6 +67,10 @@ unsafe fn should_collect(hwnd: HWND) -> bool {
         return false;
     }
 
+    if is_shell_surface_class(&window_class_name(hwnd)) {
+        return false;
+    }
+
     rect_for_window(hwnd).is_some_and(|rect| rect.area() > 0)
 }
 
@@ -86,6 +91,10 @@ unsafe fn collect_window(hwnd: HWND, focused: bool) -> Option<RawWindow> {
     });
 
     if app_name == "Unknown" && title.is_empty() {
+        return None;
+    }
+
+    if app_name.eq_ignore_ascii_case("explorer.exe") && title.is_empty() {
         return None;
     }
 
@@ -144,6 +153,36 @@ unsafe fn window_title(hwnd: HWND) -> String {
     String::from_utf16_lossy(&buffer[..copied as usize])
         .trim()
         .to_string()
+}
+
+unsafe fn window_class_name(hwnd: HWND) -> String {
+    let mut buffer = vec![0_u16; 256];
+    let copied = GetClassNameW(hwnd, &mut buffer);
+
+    if copied <= 0 {
+        return String::new();
+    }
+
+    String::from_utf16_lossy(&buffer[..copied as usize])
+        .trim()
+        .to_string()
+}
+
+fn is_shell_surface_class(class_name: &str) -> bool {
+    matches!(
+        class_name,
+        "Progman"
+            | "WorkerW"
+            | "Shell_TrayWnd"
+            | "Shell_SecondaryTrayWnd"
+            | "NotifyIconOverflowWindow"
+            | "DV2ControlHost"
+            | "MSTaskListWClass"
+            | "TrayNotifyWnd"
+            | "TrayClockWClass"
+            | "SysShadow"
+            | "tooltips_class32"
+    )
 }
 
 unsafe fn process_path(pid: u32) -> Option<String> {

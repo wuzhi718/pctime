@@ -128,11 +128,28 @@ pub struct TimelineApp {
     pub seconds: i64,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ActivityTrack {
+    pub app_name: String,
+    pub category: String,
+    pub seconds: i64,
+    pub segments: Vec<ActivityTrackSegment>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ActivityTrackSegment {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub seconds: i64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct RangeQuery {
     pub preset: String,
     pub start_ms: Option<i64>,
     pub end_ms: Option<i64>,
+    pub start_of_day_minutes: Option<i64>,
+    pub week_start: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -171,6 +188,7 @@ pub struct Dashboard {
     pub apps: Vec<AppSummary>,
     pub windows: Vec<WindowSummary>,
     pub timeline: Vec<TimelinePoint>,
+    pub tracks: Vec<ActivityTrack>,
     pub live_windows: Vec<LiveWindow>,
     pub health: CaptureHealth,
 }

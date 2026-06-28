@@ -2,10 +2,8 @@ import {
   Activity,
   BarChart3,
   CalendarDays,
+  CalendarClock,
   Clock,
-  Database,
-  Download,
-  ExternalLink,
   Gauge,
   HardDrive,
   Languages,
@@ -25,15 +23,30 @@ import {
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import {
+  FloatingTooltip,
+  Panel,
+  SegmentedControl,
+  SwitchRow,
+  type FloatingTooltipData,
+  type TooltipControls,
+  type TooltipLine,
+} from "./ui";
 import "./App.css";
 
 type ViewId = "overview" | "activity" | "settings";
 type Locale = "zh-CN" | "en-US";
 type Theme = "dark" | "light";
 type RangePreset = "day" | "week" | "month" | "year" | "custom";
+type WeekStart = "monday" | "sunday";
 
-type RangePayload = { preset: RangePreset; start_ms?: number; end_ms?: number };
+type RangePayload = {
+  preset: RangePreset;
+  start_ms?: number;
+  end_ms?: number;
+  start_of_day_minutes?: number;
+  week_start?: WeekStart;
+};
 type RangeInfo = { preset: string; start_ms: number; end_ms: number; label: string; bucket: string };
 type MetricCard = { label: string; value_seconds: number; helper: string };
 type CategorySummary = { category: string; seconds: number; focus_seconds: number; share: number; sample_count: number };
@@ -41,23 +54,12 @@ type AppSummary = { app_name: string; category: string; seconds: number; focus_s
 type WindowSummary = { app_name: string; window_title: string; category: string; seconds: number; focus_seconds: number; share: number };
 type TimelineApp = { app_name: string; category: string; seconds: number };
 type TimelinePoint = { hour: string; active_seconds: number; idle_seconds: number; top_apps: TimelineApp[] };
+type ActivityTrackSegment = { start_ms: number; end_ms: number; seconds: number };
+type ActivityTrack = { app_name: string; category: string; seconds: number; segments: ActivityTrackSegment[] };
 type LiveWindow = { app_name: string; window_title: string; category: string; visible_area: number; visible_share: number; focused: boolean };
 type DonutSegment = { key: string; label: string; lines?: TooltipLine[]; valueLabel: string; shareLabel: string; color: string; share: number };
-type TooltipLine = { color?: string; label: string; value: string };
-type FloatingTooltipData = { color?: string; lines?: TooltipLine[]; primary: string; secondary?: string; title: string; x: number; y: number };
-type TooltipControls = { hideTooltip: () => void; showTooltip: (tooltip: FloatingTooltipData) => void };
-type GitHubReleaseAsset = { browser_download_url: string; name: string };
-type GitHubRelease = { assets: GitHubReleaseAsset[]; body?: string; html_url: string; tag_name: string };
-type UpdateState = {
-  assetName: string | null;
-  assetUrl: string | null;
-  available: boolean | null;
-  checkedAt: string | null;
-  checking: boolean;
-  error: string | null;
-  latestVersion: string | null;
-  releaseUrl: string | null;
-};
+type GitHubRelease = { html_url: string; tag_name: string };
+type LatestRelease = { available: boolean; latestVersion: string; releaseUrl: string };
 type CaptureHealth = {
   monitoring: boolean;
   database_path: string;
@@ -82,6 +84,7 @@ type Dashboard = {
   apps: AppSummary[];
   windows: WindowSummary[];
   timeline: TimelinePoint[];
+  tracks: ActivityTrack[];
   live_windows: LiveWindow[];
   health: CaptureHealth;
 };
@@ -102,11 +105,12 @@ const copy = {
     panels: {
       categoryMix: "分类占比",
       timeline: "时间趋势",
+      tracks: "活动轨道",
       applications: "应用明细",
       topApps: "高频应用",
       appearance: "外观",
+      tracking: "追踪规则",
       startup: "系统",
-      updates: "软件更新",
       storage: "存储与性能",
     },
     table: {
@@ -119,7 +123,7 @@ const copy = {
       samples: "样本",
     },
     cards: {
-      "Visible time": ["可见时间", "分屏窗口会按实际可见面积计入"],
+      "Visible time": ["可见时间", "窗口可见总时长"],
       "Focused time": ["焦点时间", "传统前台窗口统计"],
       "Idle time": ["离开时间", "超过 5 分钟无输入后计入"],
       "Needs rules": ["待分类", "还没有匹配规则的可见时间"],
@@ -161,29 +165,22 @@ const copy = {
       theme: "主题",
       dark: "黑色",
       light: "白色",
+      startOfDay: "一天开始于",
+      weekStart: "每周开始于",
+      monday: "周一",
+      sunday: "周日",
+      releaseNotifications: "新版本提醒",
+      alwaysActivePattern: "始终视为活跃",
+      alwaysActivePatternHint: "用 | 分隔关键词，例如 Zoom|Teams|bilibili。",
       startup: "开机自启动",
       startupHint: "登录 Windows 后自动启动 PCTime。",
       closeToTray: "关闭按钮放到后台",
       closeToTrayHint: "开启后点击关闭会隐藏到 Windows 托盘，点击托盘图标可恢复；关闭后点击关闭会直接退出程序。",
+      sampleInterval: "采样间隔",
+      sampleIntervalHint: "默认 5 秒。数值越大越省资源。",
       screenOff: "电脑只是息屏但没有睡眠时，PCTime 仍会运行；超过空闲阈值后统计为离开时间。电脑睡眠/休眠时不会采样，也不会把睡眠时长算进任何应用。",
-      performanceNote: "默认每秒采样一次，只写入很小的 SQLite 文本记录；正常桌面使用时 CPU 占用应非常低。",
-      storageNote: "数据库优先放在软件安装目录的 pctime-data 文件夹，写入失败才回退到用户 AppData。",
-    },
-    updates: {
-      autoNote: "PCTime 会每天自动检查一次 GitHub Releases，不需要自建服务器，也不会影响本地采集。",
-      available: "发现新版本",
-      availableNote: "GitHub Release 上有新版本，可以下载 Windows 安装包。",
-      checkNow: "检查更新",
-      checkedAt: "上次检查",
-      checking: "检查中",
-      current: "已是最新版本",
-      currentNote: "当前版本已经是 GitHub Release 上的最新版本。",
-      currentVersion: "当前版本",
-      downloadWindows: "下载 Windows x64",
-      failed: "检查失败",
-      latestVersion: "最新版本",
-      openRelease: "打开 Release",
-      unknown: "未知",
+      performanceNote: "相同桌面状态会自动合并成时间段；采样间隔越长，CPU 唤醒和 SQLite 写入越少。普通电脑建议 2-5 秒，老电脑建议 5-10 秒。",
+      storageNote: "数据库优先放在软件安装目录的 pctime-data 文件夹，写入失败才回退到用户 AppData；应用排行使用轨道时间，显示大小包含 SQLite、WAL 和 SHM 文件。",
     },
     status: {
       database: "数据库",
@@ -196,7 +193,7 @@ const copy = {
       dbSize: "数据库大小",
       dailyEstimate: "今日预计写入",
       rows: "总记录",
-      samplesToday: "今日样本",
+      samplesToday: "今日状态段",
     },
     actions: {
       refresh: "刷新",
@@ -226,11 +223,12 @@ const copy = {
     panels: {
       categoryMix: "Category mix",
       timeline: "Time trend",
+      tracks: "Activity tracks",
       applications: "Application details",
       topApps: "Top apps",
       appearance: "Appearance",
+      tracking: "Tracking rules",
       startup: "System",
-      updates: "Software updates",
       storage: "Storage and performance",
     },
     table: {
@@ -243,7 +241,7 @@ const copy = {
       samples: "Samples",
     },
     cards: {
-      "Visible time": ["Visible time", "Split-screen windows are weighted by visible area"],
+      "Visible time": ["Visible time", "Window visible time"],
       "Focused time": ["Focused time", "Traditional foreground-window time"],
       "Idle time": ["Idle time", "No input for 5 minutes"],
       "Needs rules": ["Needs rules", "Unclassified visible time"],
@@ -285,29 +283,22 @@ const copy = {
       theme: "Theme",
       dark: "Dark",
       light: "Light",
+      startOfDay: "Start of day",
+      weekStart: "Start of week",
+      monday: "Monday",
+      sunday: "Sunday",
+      releaseNotifications: "New release notification",
+      alwaysActivePattern: "Always count as active",
+      alwaysActivePatternHint: "Separate keywords with |, e.g. Zoom|Teams|bilibili.",
       startup: "Start at login",
       startupHint: "Launch PCTime automatically after signing in to Windows.",
       closeToTray: "Close to background",
       closeToTrayHint: "When enabled, the close button hides PCTime to the Windows tray. Turn it off to exit the app when closing.",
+      sampleInterval: "Sampling interval",
+      sampleIntervalHint: "Default is 5s. Higher values use fewer resources.",
       screenOff: "If the display turns off but the PC stays awake, PCTime keeps running; after the idle threshold it is recorded as idle time. During sleep or hibernation, sampling stops and the sleep gap is not counted for any app.",
-      performanceNote: "The collector samples once per second and writes small SQLite text rows, so CPU use should stay very low in normal desktop work.",
-      storageNote: "The database is stored in a pctime-data folder next to the app when possible, then falls back to user AppData if that location is not writable.",
-    },
-    updates: {
-      autoNote: "PCTime checks GitHub Releases once per day. No custom server is required, and failed checks never affect local tracking.",
-      available: "Update available",
-      availableNote: "A newer GitHub Release is available. Download the Windows installer when you are ready.",
-      checkNow: "Check for updates",
-      checkedAt: "Last checked",
-      checking: "Checking",
-      current: "Up to date",
-      currentNote: "This version matches the latest GitHub Release.",
-      currentVersion: "Current version",
-      downloadWindows: "Download Windows x64",
-      failed: "Check failed",
-      latestVersion: "Latest version",
-      openRelease: "Open Release",
-      unknown: "Unknown",
+      performanceNote: "Unchanged desktop states are merged into time segments. Longer intervals reduce CPU wakeups and SQLite writes. 2-5s fits normal PCs; 5-10s fits older machines.",
+      storageNote: "The database is stored in a pctime-data folder next to the app when possible, then falls back to user AppData. App rankings use track time; the shown size includes SQLite, WAL, and SHM files.",
     },
     status: {
       database: "Database",
@@ -320,7 +311,7 @@ const copy = {
       dbSize: "Database size",
       dailyEstimate: "Daily estimate",
       rows: "Rows",
-      samplesToday: "Today samples",
+      samplesToday: "Today segments",
     },
     actions: {
       refresh: "Refresh",
@@ -342,16 +333,7 @@ type UiCopy = (typeof copy)[Locale];
 const UPDATE_ENDPOINT = "https://api.github.com/repos/wuzhi718/pctime/releases/latest";
 const UPDATE_CHECK_KEY = "pctime-last-update-check";
 const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1_000;
-const emptyUpdateState: UpdateState = {
-  assetName: null,
-  assetUrl: null,
-  available: null,
-  checkedAt: null,
-  checking: false,
-  error: null,
-  latestVersion: null,
-  releaseUrl: null,
-};
+const DEFAULT_START_OF_DAY = "04:00";
 
 const cardIcons: Record<string, LucideIcon> = {
   "Visible time": Activity,
@@ -383,6 +365,30 @@ const categoryColors: Record<string, string> = {
   Unclassified: "#b45309",
 };
 
+const zhAppNames: Record<string, string> = {
+  "explorer.exe": "文件资源管理器",
+  "chrome.exe": "Google Chrome",
+  "msedge.exe": "Microsoft Edge",
+  "wechatappex.exe": "微信",
+  "weixin.exe": "微信",
+  "codex.exe": "Codex",
+  "chatgpt.exe": "ChatGPT",
+  "clash-verge.exe": "Clash Verge",
+  "nvidia overlay.exe": "NVIDIA Overlay",
+};
+
+const enAppNames: Record<string, string> = {
+  "explorer.exe": "File Explorer",
+  "chrome.exe": "Google Chrome",
+  "msedge.exe": "Microsoft Edge",
+  "wechatappex.exe": "WeChat",
+  "weixin.exe": "WeChat",
+  "codex.exe": "Codex",
+  "chatgpt.exe": "ChatGPT",
+  "clash-verge.exe": "Clash Verge",
+  "nvidia overlay.exe": "NVIDIA Overlay",
+};
+
 const navItems: Array<{ id: ViewId; icon: LucideIcon }> = [
   { id: "overview", icon: BarChart3 },
   { id: "activity", icon: Table2 },
@@ -390,6 +396,7 @@ const navItems: Array<{ id: ViewId; icon: LucideIcon }> = [
 ];
 
 const rangePresets: RangePreset[] = ["day", "week", "month", "year", "custom"];
+const sampleIntervalOptions = [1_000, 2_000, 5_000, 10_000, 30_000];
 
 function App() {
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
@@ -400,10 +407,13 @@ function App() {
   const [rangePreset, setRangePreset] = useState<RangePreset>(() => readStorage("pctime-range", "day"));
   const [customStart, setCustomStart] = useState(() => toLocalInput(startOfToday()));
   const [customEnd, setCustomEnd] = useState(() => toLocalInput(new Date()));
-  const [appVersion, setAppVersion] = useState("0.1.4");
+  const [startOfDay, setStartOfDay] = useState<string>(() => readStorage("pctime-start-of-day", DEFAULT_START_OF_DAY));
+  const [weekStart, setWeekStart] = useState<WeekStart>(() => readStorage("pctime-week-start", "monday"));
+  const [releaseNotifications, setReleaseNotifications] = useState(() => readStorage("pctime-release-notifications", "true") === "true");
+  const [alwaysActivePattern, setAlwaysActivePattern] = useState("");
+  const [appVersion, setAppVersion] = useState("0.1.6");
   const [startupEnabled, setStartupEnabled] = useState<boolean | null>(null);
   const [closeToTray, setCloseToTray] = useState<boolean | null>(null);
-  const [updateState, setUpdateState] = useState<UpdateState>(emptyUpdateState);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -412,13 +422,18 @@ function App() {
   const t = copy[locale];
 
   const range = useMemo<RangePayload>(() => {
-    if (rangePreset !== "custom") return { preset: rangePreset };
+    const preferences = {
+      start_of_day_minutes: timeToMinutes(startOfDay),
+      week_start: weekStart,
+    };
+    if (rangePreset !== "custom") return { preset: rangePreset, ...preferences };
     return {
       preset: "custom",
       start_ms: customStart ? new Date(customStart).getTime() : undefined,
       end_ms: customEnd ? new Date(customEnd).getTime() : undefined,
+      ...preferences,
     };
-  }, [customEnd, customStart, rangePreset]);
+  }, [customEnd, customStart, rangePreset, startOfDay, weekStart]);
 
   const loadDashboard = useCallback(async () => {
     try {
@@ -433,24 +448,15 @@ function App() {
     }
   }, [range]);
 
-  const checkForUpdates = useCallback(async (silent = false) => {
-    setUpdateState((current) => ({ ...current, checking: true, error: null }));
-
+  const checkForUpdates = useCallback(async () => {
     try {
       const latest = await fetchLatestRelease(appVersion);
-      const checkedAt = new Date().toISOString();
-      const next = { ...latest, checkedAt, checking: false, error: null };
-      setUpdateState(next);
       localStorage.setItem(UPDATE_CHECK_KEY, String(Date.now()));
+      localStorage.setItem("pctime-latest-version", latest.latestVersion);
+      localStorage.setItem("pctime-latest-release", latest.releaseUrl);
+      localStorage.setItem("pctime-update-available", latest.available ? "true" : "false");
     } catch (caught) {
-      const message = caught instanceof Error ? caught.message : String(caught);
-      setUpdateState((current) => ({
-        ...current,
-        available: silent ? current.available : null,
-        checkedAt: new Date().toISOString(),
-        checking: false,
-        error: message,
-      }));
+      localStorage.setItem("pctime-last-update-error", caught instanceof Error ? caught.message : String(caught));
     }
   }, [appVersion]);
 
@@ -463,7 +469,7 @@ function App() {
   useEffect(() => {
     void appInvoke<string>("get_app_version")
       .then(setAppVersion)
-      .catch(() => setAppVersion("0.1.4"));
+      .catch(() => setAppVersion("0.1.6"));
   }, []);
 
   useEffect(() => {
@@ -481,14 +487,18 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!releaseNotifications) return;
     const lastCheck = Number(localStorage.getItem(UPDATE_CHECK_KEY) ?? "0");
     if (Date.now() - lastCheck < UPDATE_CHECK_INTERVAL_MS) return;
-    void checkForUpdates(true);
-  }, [checkForUpdates]);
+    void checkForUpdates();
+  }, [checkForUpdates, releaseNotifications]);
 
   useEffect(() => localStorage.setItem("pctime-locale", locale), [locale]);
   useEffect(() => localStorage.setItem("pctime-theme", theme), [theme]);
   useEffect(() => localStorage.setItem("pctime-range", rangePreset), [rangePreset]);
+  useEffect(() => localStorage.setItem("pctime-start-of-day", startOfDay), [startOfDay]);
+  useEffect(() => localStorage.setItem("pctime-week-start", weekStart), [weekStart]);
+  useEffect(() => localStorage.setItem("pctime-release-notifications", String(releaseNotifications)), [releaseNotifications]);
   useEffect(() => localStorage.setItem("pctime-sidebar", sidebarCollapsed ? "collapsed" : "expanded"), [sidebarCollapsed]);
 
   useEffect(() => {
@@ -503,12 +513,19 @@ function App() {
       .catch(() => setCloseToTray(true));
   }, []);
 
+  useEffect(() => {
+    void appInvoke<string>("get_always_active_pattern")
+      .then(setAlwaysActivePattern)
+      .catch(() => setAlwaysActivePattern(""));
+  }, []);
+
   const filteredApps = useMemo(() => {
     const value = query.trim().toLowerCase();
     if (!dashboard || !value) return dashboard?.apps ?? [];
     return dashboard.apps.filter(
       (app) =>
         app.app_name.toLowerCase().includes(value) ||
+        appLabel(app.app_name, t).toLowerCase().includes(value) ||
         app.category.toLowerCase().includes(value) ||
         categoryLabel(app.category, t).toLowerCase().includes(value),
     );
@@ -541,6 +558,27 @@ function App() {
       setCloseToTray(actual);
     } catch (caught) {
       setCloseToTray(!enabled);
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
+  async function changeSampleInterval(intervalMs: number) {
+    try {
+      const actual = await appInvoke<number>("set_sample_interval_ms", { intervalMs });
+      setDashboard((current) => current
+        ? { ...current, health: { ...current.health, sample_interval_ms: actual } }
+        : current);
+      await loadDashboard();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
+  async function saveAlwaysActivePattern(pattern: string) {
+    try {
+      const actual = await appInvoke<string>("set_always_active_pattern", { pattern });
+      setAlwaysActivePattern(actual);
+    } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     }
   }
@@ -634,21 +672,28 @@ function App() {
               closeToTray={closeToTray}
               filteredApps={filteredApps}
               locale={locale}
-              appVersion={appVersion}
               query={query}
+              alwaysActivePattern={alwaysActivePattern}
+              releaseNotifications={releaseNotifications}
+              saveAlwaysActivePattern={saveAlwaysActivePattern}
+              setAlwaysActivePattern={setAlwaysActivePattern}
               setLocale={setLocale}
               setCloseToTray={changeCloseToTray}
+              setReleaseNotifications={setReleaseNotifications}
+              setSampleInterval={changeSampleInterval}
               setQuery={setQuery}
+              setStartOfDay={setStartOfDay}
               setStartupEnabled={changeStartup}
               setTheme={setTheme}
+              setWeekStart={setWeekStart}
               showTooltip={showTooltip}
               hideTooltip={hideTooltip}
+              startOfDay={startOfDay}
               startupEnabled={startupEnabled}
               t={t}
               theme={theme}
-              updateState={updateState}
-              checkForUpdates={checkForUpdates}
               view={view}
+              weekStart={weekStart}
             />
           ) : (
             <EmptyState label={t.empty.unavailable} />
@@ -663,50 +708,64 @@ function App() {
 }
 
 function ActivePage({
-  appVersion,
-  checkForUpdates,
+  alwaysActivePattern,
   dashboard,
   closeToTray,
   filteredApps,
   locale,
   query,
+  releaseNotifications,
+  saveAlwaysActivePattern,
+  setAlwaysActivePattern,
   setLocale,
   setCloseToTray,
+  setReleaseNotifications,
+  setSampleInterval,
   setQuery,
+  setStartOfDay,
   setStartupEnabled,
   setTheme,
+  setWeekStart,
   showTooltip,
   hideTooltip,
+  startOfDay,
   startupEnabled,
   t,
   theme,
-  updateState,
   view,
+  weekStart,
 }: {
-  appVersion: string;
-  checkForUpdates: (silent?: boolean) => Promise<void>;
+  alwaysActivePattern: string;
   dashboard: Dashboard;
   closeToTray: boolean | null;
   filteredApps: AppSummary[];
   locale: Locale;
   query: string;
+  releaseNotifications: boolean;
+  saveAlwaysActivePattern: (pattern: string) => Promise<void>;
+  setAlwaysActivePattern: (value: string) => void;
   setLocale: (value: Locale) => void;
   setCloseToTray: (enabled: boolean) => void;
+  setReleaseNotifications: (enabled: boolean) => void;
+  setSampleInterval: (intervalMs: number) => void;
   setQuery: (value: string) => void;
+  setStartOfDay: (value: string) => void;
   setStartupEnabled: (enabled: boolean) => void;
   setTheme: (value: Theme) => void;
+  setWeekStart: (value: WeekStart) => void;
   showTooltip: (tooltip: FloatingTooltipData) => void;
   hideTooltip: () => void;
+  startOfDay: string;
   startupEnabled: boolean | null;
   t: UiCopy;
   theme: Theme;
-  updateState: UpdateState;
   view: ViewId;
+  weekStart: WeekStart;
 }) {
   if (view === "activity") {
     return (
       <div className="page-grid activity-page">
-        <Panel title={t.panels.categoryMix} action={<Clock size={18} />}>
+        <Panel title={t.panels.categoryMix} className="category-panel" action={<Clock size={18} />}>
           <CategoryList categories={dashboard.categories} t={t} />
         </Panel>
         <Panel
@@ -716,49 +775,99 @@ function ActivePage({
         >
           <AppTable apps={filteredApps} t={t} />
         </Panel>
+        <Panel title={t.panels.tracks} className="tracks-panel" action={<CalendarDays size={18} />}>
+          <ActivityTracks
+            hideTooltip={hideTooltip}
+            range={dashboard.range}
+            sampleIntervalMs={dashboard.health.sample_interval_ms}
+            showTooltip={showTooltip}
+            t={t}
+            tracks={dashboard.tracks}
+          />
+        </Panel>
       </div>
     );
   }
 
   if (view === "settings") {
     return (
-      <div className="page-grid settings-page">
-        <Panel title={t.panels.appearance} action={<Languages size={18} />}>
-          <div className="settings-stack">
-            <SettingBlock label={t.settings.language}>
-              <SegmentedLanguage locale={locale} setLocale={setLocale} />
-            </SettingBlock>
-            <SettingBlock label={t.settings.theme}>
-              <SegmentedTheme setTheme={setTheme} t={t} theme={theme} />
-            </SettingBlock>
+      <div className="settings-page">
+        <div className="settings-main">
+          <div className="settings-column">
+            <Panel title={t.panels.appearance} action={<Languages size={18} />}>
+              <div className="settings-stack compact-settings">
+                <SettingBlock label={t.settings.language}>
+                  <SegmentedLanguage locale={locale} setLocale={setLocale} />
+                </SettingBlock>
+                <SettingBlock label={t.settings.theme}>
+                  <SegmentedTheme setTheme={setTheme} t={t} theme={theme} />
+                </SettingBlock>
+              </div>
+            </Panel>
+
+            <Panel title={t.panels.startup} action={<Power size={18} />}>
+              <div className="settings-stack">
+                <SwitchRow
+                  checked={Boolean(startupEnabled)}
+                  disabled={startupEnabled === null}
+                  label={t.settings.startup}
+                  onChange={setStartupEnabled}
+                />
+                <SwitchRow
+                  checked={Boolean(closeToTray)}
+                  disabled={closeToTray === null}
+                  label={t.settings.closeToTray}
+                  onChange={setCloseToTray}
+                />
+                <SwitchRow
+                  checked={releaseNotifications}
+                  label={t.settings.releaseNotifications}
+                  onChange={setReleaseNotifications}
+                />
+              </div>
+            </Panel>
           </div>
-        </Panel>
 
-        <Panel title={t.panels.startup} action={<Power size={18} />}>
-          <div className="settings-stack">
-            <SwitchRow
-              checked={Boolean(startupEnabled)}
-              disabled={startupEnabled === null}
-              label={t.settings.startup}
-              note={t.settings.startupHint}
-              onChange={setStartupEnabled}
-            />
-            <SwitchRow
-              checked={Boolean(closeToTray)}
-              disabled={closeToTray === null}
-              label={t.settings.closeToTray}
-              note={t.settings.closeToTrayHint}
-              onChange={setCloseToTray}
-            />
-            <InfoNote icon={<Power size={18} />} text={t.settings.screenOff} />
+          <div className="settings-column">
+            <Panel title={t.panels.tracking} action={<CalendarClock size={18} />}>
+              <div className="settings-stack">
+                <div className="settings-pair">
+                  <SettingBlock label={t.settings.startOfDay}>
+                    <input
+                      className="setting-input"
+                      type="time"
+                      value={startOfDay}
+                      onChange={(event) => setStartOfDay(event.currentTarget.value || DEFAULT_START_OF_DAY)}
+                    />
+                  </SettingBlock>
+                  <SettingBlock label={t.settings.weekStart}>
+                    <SegmentedWeekStart setWeekStart={setWeekStart} t={t} weekStart={weekStart} />
+                  </SettingBlock>
+                </div>
+                <SettingBlock label={t.settings.sampleInterval}>
+                  <SegmentedSampleInterval
+                    onChange={setSampleInterval}
+                    t={t}
+                    value={dashboard.health.sample_interval_ms}
+                  />
+                  <small className="setting-hint">{t.settings.sampleIntervalHint}</small>
+                </SettingBlock>
+                <SettingBlock label={t.settings.alwaysActivePattern}>
+                  <input
+                    className="setting-input"
+                    placeholder="Zoom|Teams|bilibili"
+                    value={alwaysActivePattern}
+                    onBlur={(event) => void saveAlwaysActivePattern(event.currentTarget.value)}
+                    onChange={(event) => setAlwaysActivePattern(event.currentTarget.value)}
+                  />
+                  <small className="setting-hint">{t.settings.alwaysActivePatternHint}</small>
+                </SettingBlock>
+              </div>
+            </Panel>
           </div>
-        </Panel>
+        </div>
 
-        <Panel title={t.panels.updates} action={<RefreshCcw size={18} />}>
-          <UpdatePanel appVersion={appVersion} onCheck={checkForUpdates} t={t} updateState={updateState} />
-        </Panel>
-
-        <Panel title={t.panels.storage} action={<HardDrive size={18} />}>
+        <Panel title={t.panels.storage} className="settings-storage-panel" action={<HardDrive size={18} />}>
           <div className="settings-grid">
             <InfoItem label={t.status.storageLocation} value={storageLocationLabel(dashboard.health.storage_location, t)} />
             <InfoItem label={t.status.database} value={dashboard.health.database_path} />
@@ -768,10 +877,6 @@ function ActivePage({
             <InfoItem label={t.status.samplesToday} value={dashboard.health.samples_today.toLocaleString()} />
             <InfoItem label={t.status.sampleInterval} value={`${dashboard.health.sample_interval_ms / 1000}s`} />
             <InfoItem label={t.status.idleThreshold} value={formatDuration(dashboard.health.idle_threshold_seconds)} />
-          </div>
-          <div className="note-stack">
-            <InfoNote icon={<Gauge size={18} />} text={t.settings.performanceNote} />
-            <InfoNote icon={<Database size={18} />} text={t.settings.storageNote} />
           </div>
         </Panel>
       </div>
@@ -784,7 +889,12 @@ function ActivePage({
         {dashboard.cards.map((card) => <MetricTile key={card.label} card={card} t={t} />)}
       </section>
       <Panel title={t.panels.timeline} action={<CalendarDays size={18} />}>
-        <Timeline hideTooltip={hideTooltip} points={dashboard.timeline} showTooltip={showTooltip} t={t} />
+        <Timeline
+          hideTooltip={hideTooltip}
+          points={dashboard.timeline}
+          showTooltip={showTooltip}
+          t={t}
+        />
       </Panel>
       <Panel title={t.panels.categoryMix} action={<PieChart size={18} />}>
         <CategoryDonut apps={dashboard.apps} categories={dashboard.categories} hideTooltip={hideTooltip} showTooltip={showTooltip} t={t} />
@@ -855,18 +965,6 @@ function MetricTile({ card, t }: { card: MetricCard; t: UiCopy }) {
   );
 }
 
-function Panel({ title, action, children, className }: { title: string; action?: React.ReactNode; children: React.ReactNode; className?: string }) {
-  return (
-    <section className={["panel", className].filter(Boolean).join(" ")}>
-      <div className="panel-header">
-        <h2>{title}</h2>
-        <div className="panel-action">{action}</div>
-      </div>
-      <div className="panel-body">{children}</div>
-    </section>
-  );
-}
-
 function CategoryList({ categories, t }: { categories: CategorySummary[]; t: UiCopy }) {
   if (!categories.length) return <EmptyState label={t.empty.noActivity} />;
   return (
@@ -931,11 +1029,12 @@ function AppBarList({ apps, t }: { apps: AppSummary[]; t: UiCopy }) {
       {apps.map((app) => {
         const width = `${Math.max((app.seconds / maxSeconds) * 100, app.seconds > 0 ? 3 : 0)}%`;
         const style = { "--accent": categoryColor(app.category), "--bar-width": width } as CSSProperties;
+        const label = appLabel(app.app_name, t);
         return (
           <div className="app-bar-row" key={`${app.app_name}-${app.category}`} style={style}>
             <div className="app-bar-head">
               <CategoryPill category={app.category} t={t} />
-              <strong>{app.app_name}</strong>
+              <strong title={app.app_name}>{label}</strong>
               <span>{formatDuration(app.seconds)}</span>
               <em>{formatPercent(app.share)}</em>
             </div>
@@ -960,7 +1059,7 @@ function TopAppsVisual({ apps, hideTooltip, showTooltip, t }: { apps: AppSummary
 
 function AppShareDonut({ apps, hideTooltip, showTooltip, t }: { apps: AppSummary[]; t: UiCopy } & TooltipControls) {
   const totalSeconds = Math.max(apps.reduce((sum, app) => sum + app.seconds, 0), 1);
-  const segments = buildAppSegments(apps);
+  const segments = buildAppSegments(apps, t);
 
   return (
     <div className="app-share-card">
@@ -976,7 +1075,7 @@ function AppShareDonut({ apps, hideTooltip, showTooltip, t }: { apps: AppSummary
         {apps.slice(0, 5).map((app, index) => (
           <div key={`${app.app_name}-${app.category}-share`}>
             <span style={{ "--accent": appColor(app, index) } as CSSProperties} />
-            <strong>{app.app_name}</strong>
+            <strong title={app.app_name}>{appLabel(app.app_name, t)}</strong>
             <em>{formatPercent(app.seconds / totalSeconds)}</em>
           </div>
         ))}
@@ -1077,14 +1176,22 @@ function RingDonut({
   );
 }
 
-function Timeline({ hideTooltip, points, showTooltip, t }: { points: TimelinePoint[]; t: UiCopy } & TooltipControls) {
+function Timeline({
+  hideTooltip,
+  points,
+  showTooltip,
+  t,
+}: {
+  points: TimelinePoint[];
+  t: UiCopy;
+} & TooltipControls) {
   if (!points.length) return <EmptyState label="No timeline" />;
   const maxSeconds = Math.max(...points.map((point) => point.active_seconds + point.idle_seconds), 1);
   const style = { "--timeline-count": points.length } as CSSProperties;
 
   const pointLabel = (point: TimelinePoint) => {
     const apps = point.top_apps
-      .map((app) => `${app.app_name} - ${categoryLabel(app.category, t)} - ${formatDuration(app.seconds)} - ${point.active_seconds > 0 ? formatPercent(Math.min(app.seconds / point.active_seconds, 1)) : "0%"}`)
+      .map((app) => `${appLabel(app.app_name, t)} - ${categoryLabel(app.category, t)} - ${formatDuration(app.seconds)}`)
       .join("; ");
     return `${point.hour}. ${t.table.visible}: ${formatDuration(point.active_seconds)}${point.idle_seconds > 0 ? `. ${t.cards["Idle time"][0]}: ${formatDuration(point.idle_seconds)}` : ""}${apps ? `. Top apps: ${apps}` : ""}`;
   };
@@ -1098,8 +1205,8 @@ function Timeline({ hideTooltip, points, showTooltip, t }: { points: TimelinePoi
       y: event.clientY,
       lines: point.top_apps.map((app) => ({
         color: categoryColor(app.category),
-        label: app.app_name,
-        value: `${categoryLabel(app.category, t)} - ${formatDuration(app.seconds)} - ${point.active_seconds > 0 ? formatPercent(Math.min(app.seconds / point.active_seconds, 1)) : "0%"}`,
+        label: appLabel(app.app_name, t),
+        value: `${categoryLabel(app.category, t)} - ${formatDuration(app.seconds)}`,
       })),
     });
   };
@@ -1142,39 +1249,78 @@ function Timeline({ hideTooltip, points, showTooltip, t }: { points: TimelinePoi
   );
 }
 
-function FloatingTooltip({ color, lines = [], primary, secondary, title, x, y }: FloatingTooltipData) {
-  const targetWidth = Math.min(lines.length ? 330 : 240, window.innerWidth - 24);
-  const placeRight = x + 18 + targetWidth < window.innerWidth;
-  const left = placeRight ? x + 16 : Math.max(12, x - targetWidth - 16);
-  const top = Math.max(12, Math.min(y - 18, window.innerHeight - 188));
-  const style = {
-    "--tooltip-anchor": placeRight ? "left" : "right",
-    "--tooltip-x": `${left}px`,
-    "--tooltip-y": `${top}px`,
-    "--tooltip-color": color ?? "var(--accent)",
-  } as CSSProperties;
+function ActivityTracks({
+  hideTooltip,
+  range,
+  sampleIntervalMs,
+  showTooltip,
+  t,
+  tracks,
+}: {
+  range: RangeInfo;
+  sampleIntervalMs: number;
+  t: UiCopy;
+  tracks: ActivityTrack[];
+} & TooltipControls) {
+  if (!tracks.length) return <EmptyState label={t.empty.noActivity} />;
+  const ticks = trackTicks(range);
 
   return (
-    <div className="chart-tooltip-floating" data-anchor={placeRight ? "left" : "right"} style={style}>
-      <div className="tooltip-title">
+    <div className="track-timeline" aria-label={t.panels.tracks}>
+      <div className="track-scale" aria-hidden="true">
         <span />
-        <strong>{title}</strong>
-      </div>
-      <div className="tooltip-values">
-        <span>{primary}</span>
-        {secondary ? <em>{secondary}</em> : null}
-      </div>
-      {lines.length ? (
-        <div className="tooltip-lines">
-          {lines.map((line) => (
-            <div key={`${line.label}-${line.value}`}>
-              <span style={{ "--line-color": line.color ?? "var(--tooltip-color)" } as CSSProperties} />
-              <strong>{line.label}</strong>
-              <em>{line.value}</em>
-            </div>
+        <div className="track-scale-lane">
+          {ticks.map((tick) => (
+            <small key={`${tick.left}-${tick.label}`} style={{ left: `${tick.left}%` }}>{tick.label}</small>
           ))}
         </div>
-      ) : null}
+      </div>
+      {tracks.map((track, index) => {
+        const color = appColor(track, index);
+        const label = appLabel(track.app_name, t);
+        const blocks = trackBlocks(track.segments, range, sampleIntervalMs);
+
+        return (
+          <div className="track-row" key={`${track.app_name}-${track.category}`}>
+            <div className="track-label">
+              <span style={{ "--track-color": color } as CSSProperties} />
+              <strong title={track.app_name}>{label}</strong>
+              <em>{categoryLabel(track.category, t)}</em>
+            </div>
+            <div className="track-lane">
+              {blocks.map((block) => {
+
+                const showTrackTooltip = (target: EventTarget & HTMLElement) => {
+                  const rect = target.getBoundingClientRect();
+                  showTooltip({
+                    color,
+                    title: label,
+                    primary: formatDuration(block.seconds),
+                    secondary: `${formatTrackPoint(block.start_ms, range.bucket)} - ${formatTrackPoint(block.end_ms, range.bucket)} / ${categoryLabel(track.category, t)}`,
+                    x: rect.left + rect.width / 2,
+                    y: rect.top,
+                  });
+                };
+
+                return (
+                  <span
+                    className="track-segment"
+                    key={`${block.start_ms}-${block.end_ms}`}
+                    style={{ "--track-color": color, left: `${block.left}%`, width: `${block.width}%` } as CSSProperties}
+                    tabIndex={0}
+                    onBlur={hideTooltip}
+                    onFocus={(event) => {
+                      showTrackTooltip(event.currentTarget);
+                    }}
+                    onMouseEnter={(event) => showTrackTooltip(event.currentTarget)}
+                    onMouseLeave={hideTooltip}
+                  />
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -1217,16 +1363,16 @@ function categoryAppLines(apps: AppSummary[], category: string | null, totalSeco
     .slice(0, 5)
     .map((app, index) => ({
       color: appColor(app, index),
-      label: app.app_name,
+      label: appLabel(app.app_name, t),
       value: `${formatDuration(app.seconds)} - ${formatPercent(totalSeconds > 0 ? app.seconds / totalSeconds : 0)}${category === null ? ` - ${categoryLabel(app.category, t)}` : ""}`,
     }));
 }
 
-function buildAppSegments(apps: AppSummary[]): DonutSegment[] {
+function buildAppSegments(apps: AppSummary[], t: UiCopy): DonutSegment[] {
   const totalSeconds = Math.max(apps.reduce((sum, app) => sum + app.seconds, 0), 1);
   return normalizeSegments(apps.map((app, index) => ({
     key: `${app.app_name}-${app.category}`,
-    label: app.app_name,
+    label: appLabel(app.app_name, t),
     valueLabel: formatDuration(app.seconds),
     shareLabel: formatPercent(app.seconds / totalSeconds),
     color: appColor(app, index),
@@ -1240,7 +1386,65 @@ function normalizeSegments(segments: DonutSegment[]) {
   return segments.map((segment) => ({ ...segment, share: segment.share / totalShare }));
 }
 
-function appColor(app: AppSummary, index: number) {
+function trackBlocks(segments: ActivityTrackSegment[], range: RangeInfo, sampleIntervalMs: number) {
+  const rangeMs = Math.max(1, range.end_ms - range.start_ms);
+  const mergeGapMs = Math.max(1_000, sampleIntervalMs + 250);
+  const minWidth = 0.24;
+  const blocks: Array<{ end_ms: number; left: number; seconds: number; start_ms: number; width: number }> = [];
+
+  for (const segment of [...segments].sort((left, right) => left.start_ms - right.start_ms)) {
+    const start = Math.max(segment.start_ms, range.start_ms);
+    const end = Math.min(segment.end_ms, range.end_ms);
+    if (end <= start) continue;
+
+    const last = blocks[blocks.length - 1];
+    if (last && start <= last.end_ms + mergeGapMs) {
+      last.end_ms = Math.max(last.end_ms, end);
+      last.seconds += segment.seconds;
+      continue;
+    }
+
+    blocks.push({
+      end_ms: end,
+      left: 0,
+      seconds: segment.seconds,
+      start_ms: start,
+      width: 0,
+    });
+  }
+
+  return blocks.map((block) => ({
+    ...block,
+    left: ((block.start_ms - range.start_ms) / rangeMs) * 100,
+    width: Math.max(((block.end_ms - block.start_ms) / rangeMs) * 100, minWidth),
+  }));
+}
+
+function trackTicks(range: RangeInfo) {
+  const rangeMs = Math.max(1, range.end_ms - range.start_ms);
+  const count = range.bucket === "hour" ? 7 : 6;
+  return Array.from({ length: count }, (_, index) => {
+    const ratio = index / (count - 1);
+    const timestamp = range.start_ms + rangeMs * ratio;
+    return {
+      label: formatTrackPoint(timestamp, range.bucket),
+      left: ratio * 100,
+    };
+  });
+}
+
+function formatTrackPoint(value: number, bucket: string) {
+  const date = new Date(value);
+  if (bucket === "hour") {
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+  if (bucket === "month") {
+    return date.toLocaleDateString([], { month: "2-digit", year: "numeric" });
+  }
+  return date.toLocaleDateString([], { day: "2-digit", month: "2-digit" });
+}
+
+function appColor(app: { category: string }, index: number) {
   const palette = ["#2f6fed", "#d85b70", "#8f5bd5", "#16a085", "#e0a328", "#0f8fb3", "#f97316", "#64748b"];
   return categoryColors[app.category] ?? palette[index % palette.length];
 }
@@ -1261,16 +1465,19 @@ function AppTable({ apps, t, compact = false }: { apps: AppSummary[]; t: UiCopy;
           </tr>
         </thead>
         <tbody>
-          {apps.map((app) => (
-            <tr key={`${app.app_name}-${app.category}`}>
-              <td><strong>{app.app_name}</strong></td>
-              <td><CategoryPill category={app.category} t={t} /></td>
-              <td>{formatDuration(app.seconds)}</td>
-              <td>{formatDuration(app.focus_seconds)}</td>
-              <td>{formatPercent(app.share)}</td>
-              {!compact ? <td>{app.last_seen ?? "-"}</td> : null}
-            </tr>
-          ))}
+          {apps.map((app) => {
+            const label = appLabel(app.app_name, t);
+            return (
+              <tr key={`${app.app_name}-${app.category}`}>
+                <td><strong title={app.app_name}>{label}</strong></td>
+                <td><CategoryPill category={app.category} t={t} /></td>
+                <td>{formatDuration(app.seconds)}</td>
+                <td>{formatDuration(app.focus_seconds)}</td>
+                <td>{formatPercent(app.share)}</td>
+                {!compact ? <td>{app.last_seen ?? "-"}</td> : null}
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -1299,91 +1506,64 @@ function InfoItem({ label, value }: { label: string; value: string }) {
   return <div className="info-item"><span>{label}</span><strong>{value}</strong></div>;
 }
 
-function InfoNote({ icon, text }: { icon: React.ReactNode; text: string }) {
-  return <div className="info-note">{icon}<span>{text}</span></div>;
-}
-
-function UpdatePanel({ appVersion, onCheck, t, updateState }: { appVersion: string; onCheck: (silent?: boolean) => Promise<void>; t: UiCopy; updateState: UpdateState }) {
-  const statusText = updateState.checking
-    ? t.updates.checking
-    : updateState.error
-      ? t.updates.failed
-      : updateState.available
-        ? t.updates.available
-        : updateState.available === false
-          ? t.updates.current
-          : t.updates.unknown;
-  const note = updateState.error
-    ? updateState.error
-    : updateState.available
-      ? t.updates.availableNote
-      : updateState.available === false
-        ? t.updates.currentNote
-        : t.updates.autoNote;
-
-  return (
-    <div className="settings-stack">
-      <div className={updateState.available ? "update-card available" : "update-card"}>
-        <div className="update-version-grid">
-          <InfoItem label={t.updates.currentVersion} value={`v${appVersion}`} />
-          <InfoItem label={t.updates.latestVersion} value={updateState.latestVersion ? `v${updateState.latestVersion}` : t.updates.unknown} />
-          <InfoItem label={t.updates.checkedAt} value={updateState.checkedAt ? formatDateTime(updateState.checkedAt) : t.updates.unknown} />
-        </div>
-        <div className="update-status">
-          <strong>{statusText}</strong>
-          <span>{note}</span>
-        </div>
-        <div className="update-actions">
-          <button className="secondary-button" disabled={updateState.checking} type="button" onClick={() => void onCheck(false)}>
-            <RefreshCcw className={updateState.checking ? "spin" : undefined} size={16} />
-            {updateState.checking ? t.updates.checking : t.updates.checkNow}
-          </button>
-          {updateState.assetUrl ? (
-            <button className="primary-button" type="button" onClick={() => void openExternal(updateState.assetUrl!)}>
-              <Download size={16} />
-              {t.updates.downloadWindows}
-            </button>
-          ) : null}
-          {updateState.releaseUrl ? (
-            <button className="secondary-button" type="button" onClick={() => void openExternal(updateState.releaseUrl!)}>
-              <ExternalLink size={16} />
-              {t.updates.openRelease}
-            </button>
-          ) : null}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function SwitchRow({ checked, disabled, label, note, onChange }: { checked: boolean; disabled?: boolean; label: string; note: string; onChange: (checked: boolean) => void }) {
-  return (
-    <label className={disabled ? "switch-row disabled" : "switch-row"}>
-      <span>
-        <strong>{label}</strong>
-        <small>{note}</small>
-      </span>
-      <input checked={checked} disabled={disabled} type="checkbox" onChange={(event) => onChange(event.currentTarget.checked)} />
-      <em />
-    </label>
-  );
-}
-
 function SegmentedLanguage({ locale, setLocale }: { locale: Locale; setLocale: (value: Locale) => void }) {
   return (
-    <div className="segmented-control">
-      <button className={locale === "zh-CN" ? "selected" : undefined} type="button" onClick={() => setLocale("zh-CN")}>中文</button>
-      <button className={locale === "en-US" ? "selected" : undefined} type="button" onClick={() => setLocale("en-US")}>English</button>
-    </div>
+    <SegmentedControl
+      onChange={setLocale}
+      options={[
+        { label: "中文", value: "zh-CN" },
+        { label: "English", value: "en-US" },
+      ]}
+      value={locale}
+    />
   );
 }
 
 function SegmentedTheme({ setTheme, t, theme }: { setTheme: (value: Theme) => void; t: UiCopy; theme: Theme }) {
   return (
-    <div className="segmented-control">
-      <button className={theme === "dark" ? "selected" : undefined} type="button" onClick={() => setTheme("dark")}><Moon size={15} />{t.settings.dark}</button>
-      <button className={theme === "light" ? "selected" : undefined} type="button" onClick={() => setTheme("light")}><Sun size={15} />{t.settings.light}</button>
-    </div>
+    <SegmentedControl
+      onChange={setTheme}
+      options={[
+        { icon: <Moon size={15} />, label: t.settings.dark, value: "dark" },
+        { icon: <Sun size={15} />, label: t.settings.light, value: "light" },
+      ]}
+      value={theme}
+    />
+  );
+}
+
+function SegmentedWeekStart({
+  setWeekStart,
+  t,
+  weekStart,
+}: {
+  setWeekStart: (value: WeekStart) => void;
+  t: UiCopy;
+  weekStart: WeekStart;
+}) {
+  return (
+    <SegmentedControl
+      onChange={setWeekStart}
+      options={[
+        { label: t.settings.monday, value: "monday" },
+        { label: t.settings.sunday, value: "sunday" },
+      ]}
+      value={weekStart}
+    />
+  );
+}
+
+function SegmentedSampleInterval({ onChange, t, value }: { onChange: (intervalMs: number) => void; t: UiCopy; value: number }) {
+  const normalizedValue = sampleIntervalOptions.includes(value) ? value : 5_000;
+
+  return (
+    <SegmentedControl
+      className="interval-segmented"
+      getTitle={(intervalMs) => `${t.settings.sampleInterval}: ${intervalMs / 1000}s`}
+      onChange={onChange}
+      options={sampleIntervalOptions.map((intervalMs) => ({ label: `${intervalMs / 1000}s`, value: intervalMs }))}
+      value={normalizedValue}
+    />
   );
 }
 
@@ -1404,11 +1584,16 @@ function categoryLabel(category: string, t: UiCopy) {
   return t.categories[category as keyof typeof t.categories] ?? category;
 }
 
+function appLabel(appName: string, t: UiCopy) {
+  const labels = t === copy["zh-CN"] ? zhAppNames : enAppNames;
+  return labels[appName.toLowerCase()] ?? appName;
+}
+
 function storageLocationLabel(location: string, t: UiCopy) {
   return location === "install_dir" ? t.status.installDir : t.status.fallbackDir;
 }
 
-async function fetchLatestRelease(currentVersion: string): Promise<Omit<UpdateState, "checkedAt" | "checking" | "error">> {
+async function fetchLatestRelease(currentVersion: string): Promise<LatestRelease> {
   const response = await fetch(UPDATE_ENDPOINT, {
     headers: { Accept: "application/vnd.github+json" },
   });
@@ -1419,13 +1604,8 @@ async function fetchLatestRelease(currentVersion: string): Promise<Omit<UpdateSt
 
   const release = await response.json() as GitHubRelease;
   const latestVersion = normalizeVersion(release.tag_name);
-  const asset = release.assets.find((item) => /windows.*x64.*\.msi$/i.test(item.name))
-    ?? release.assets.find((item) => /\.msi$/i.test(item.name))
-    ?? null;
 
   return {
-    assetName: asset?.name ?? null,
-    assetUrl: asset?.browser_download_url ?? null,
     available: compareVersions(latestVersion, normalizeVersion(currentVersion)) > 0,
     latestVersion,
     releaseUrl: release.html_url,
@@ -1449,15 +1629,6 @@ function compareVersions(left: string, right: string) {
   return 0;
 }
 
-async function openExternal(url: string) {
-  const hasTauri = Boolean((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
-  if (hasTauri) {
-    await openUrl(url);
-  } else {
-    window.open(url, "_blank", "noopener,noreferrer");
-  }
-}
-
 async function appInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   const hasTauri = Boolean((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
   if (hasTauri) return invoke<T>(command, args);
@@ -1466,11 +1637,15 @@ async function appInvoke<T>(command: string, args?: Record<string, unknown>): Pr
 
 function demoResponse(command: string, args?: Record<string, unknown>) {
   if (command === "get_dashboard") return demoDashboard(args?.range as RangePayload | undefined);
-  if (command === "get_app_version") return "0.1.4";
+  if (command === "get_app_version") return "0.1.6";
   if (command === "get_startup_enabled") return false;
   if (command === "set_startup_enabled") return Boolean(args?.enabled);
   if (command === "get_close_to_tray") return true;
   if (command === "set_close_to_tray") return Boolean(args?.enabled);
+  if (command === "get_sample_interval_ms") return 5_000;
+  if (command === "set_sample_interval_ms") return Number(args?.intervalMs ?? 5_000);
+  if (command === "get_always_active_pattern") return "";
+  if (command === "set_always_active_pattern") return String(args?.pattern ?? "");
   return { captured_at: Date.now(), windows_recorded: 3, idle: false, idle_seconds: 0 };
 }
 
@@ -1500,7 +1675,7 @@ function demoDashboard(range?: RangePayload): Dashboard {
     focus_seconds: 16_100,
     unclassified_seconds: 1_260,
     cards: [
-      { label: "Visible time", value_seconds: 22_860, helper: "Split-screen time is weighted by visible area" },
+      { label: "Visible time", value_seconds: 22_860, helper: "Elapsed time while windows are visible" },
       { label: "Focused time", value_seconds: 16_100, helper: "Traditional foreground-window time" },
       { label: "Idle time", value_seconds: 3_420, helper: "No input for 5 min" },
       { label: "Needs rules", value_seconds: 1_260, helper: "Unclassified visible time" },
@@ -1523,6 +1698,34 @@ function demoDashboard(range?: RangePayload): Dashboard {
     ],
     windows: [],
     timeline,
+    tracks: [
+      {
+        app_name: "Codex.exe",
+        category: "Development",
+        seconds: 6_240,
+        segments: [
+          { start_ms: Date.now() - 23_000_000, end_ms: Date.now() - 17_000_000, seconds: 6_000 },
+          { start_ms: Date.now() - 5_000_000, end_ms: Date.now() - 4_760_000, seconds: 240 },
+        ],
+      },
+      {
+        app_name: "chrome.exe",
+        category: "Research",
+        seconds: 5_430,
+        segments: [
+          { start_ms: Date.now() - 22_000_000, end_ms: Date.now() - 18_000_000, seconds: 4_000 },
+          { start_ms: Date.now() - 8_000_000, end_ms: Date.now() - 6_570_000, seconds: 1_430 },
+        ],
+      },
+      {
+        app_name: "ChatGPT.exe",
+        category: "AI Work",
+        seconds: 2_480,
+        segments: [
+          { start_ms: Date.now() - 21_000_000, end_ms: Date.now() - 18_520_000, seconds: 2_480 },
+        ],
+      },
+    ],
     live_windows: [],
     health: {
       monitoring: true,
@@ -1534,7 +1737,7 @@ function demoDashboard(range?: RangePayload): Dashboard {
       samples_today: 11_380,
       last_capture_at: new Date().toTimeString().slice(0, 8),
       idle_threshold_seconds: 300,
-      sample_interval_ms: 1_000,
+      sample_interval_ms: 5_000,
     },
   };
 }
@@ -1553,6 +1756,12 @@ function startOfToday() {
 function toLocalInput(date: Date) {
   const pad = (value: number) => String(value).padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function timeToMinutes(value: string) {
+  const [hours, minutes] = value.split(":").map((part) => Number.parseInt(part, 10));
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return 240;
+  return Math.min(23 * 60 + 59, Math.max(0, hours * 60 + minutes));
 }
 
 function formatPercent(value: number) {
@@ -1574,12 +1783,6 @@ function formatBytes(bytes: number) {
   const units = ["B", "KB", "MB", "GB"];
   const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
   return `${(bytes / 1024 ** index).toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
-}
-
-function formatDateTime(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return `${date.toLocaleDateString()} ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
 }
 
 export default App;
