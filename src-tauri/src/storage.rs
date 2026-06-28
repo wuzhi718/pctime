@@ -14,8 +14,20 @@ use crate::models::{
 
 const TRACKABLE_WINDOW_SQL: &str = "
     NOT (
-        lower(sw.app_name) = 'explorer.exe'
-        AND lower(trim(sw.window_title)) IN ('', 'program manager')
+        (
+            lower(sw.app_name) = 'explorer.exe'
+            AND lower(trim(sw.window_title)) IN ('', 'program manager')
+        )
+        OR lower(trim(sw.app_name)) IN (
+            'nvidia overlay',
+            'nvidia overlay.exe',
+            'nvidia share',
+            'nvidia share.exe'
+        )
+        OR (
+            lower(sw.app_name) = 'desktop'
+            AND lower(sw.window_title) = 'no visible tracked windows'
+        )
     )
 ";
 
@@ -417,7 +429,7 @@ pub fn dashboard(
     let range = resolve_range(range_query);
     let start_ms = range.start_ms;
     let end_ms = range.end_ms;
-    let active_ms = segment_sum_ms(&conn, start_ms, end_ms, "idle = 0")?;
+    let active_ms = active_visible_ms(&conn, start_ms, end_ms)?;
     let idle_ms = segment_sum_ms(&conn, start_ms, end_ms, "idle = 1")?;
     let focus_ms = focused_visible_ms(&conn, start_ms, end_ms)?;
     let unclassified_ms = visible_ms(
@@ -574,6 +586,26 @@ fn segment_sum_ms(
         .map_err(|error| error.to_string())
 }
 
+fn active_visible_ms(conn: &Connection, start_ms: i64, end_ms: i64) -> Result<i64, String> {
+    let sql = format!(
+        "
+        SELECT COALESCE(SUM(overlap_ms), 0)
+        FROM (
+            SELECT
+                s.id,
+                MAX(0, MIN(s.end_at, ?2) - MAX(s.start_at, ?1)) AS overlap_ms
+            FROM segment_windows sw
+            JOIN activity_segments s ON s.id = sw.segment_id
+            WHERE s.end_at > ?1 AND s.start_at < ?2 AND s.idle = 0 AND {TRACKABLE_WINDOW_SQL}
+            GROUP BY s.id
+        )
+        "
+    );
+
+    conn.query_row(&sql, params![start_ms, end_ms], |row| row.get(0))
+        .map_err(|error| error.to_string())
+}
+
 fn visible_ms(
     conn: &Connection,
     start_ms: i64,
@@ -629,9 +661,8 @@ fn category_summaries(
     end_ms: i64,
     total_ms: i64,
 ) -> Result<Vec<CategorySummary>, String> {
-    let mut stmt = conn
-        .prepare(
-            "
+    let sql = format!(
+        "
             SELECT category, SUM(overlap_ms), SUM(focus_ms), COUNT(*)
             FROM (
                 SELECT
@@ -647,18 +678,15 @@ fn category_summaries(
                 FROM segment_windows sw
                 JOIN activity_segments s ON s.id = sw.segment_id
                 WHERE s.end_at > ?1 AND s.start_at < ?2 AND s.idle = 0
-                    AND NOT (
-                        lower(sw.app_name) = 'explorer.exe'
-                        AND lower(trim(sw.window_title)) IN ('', 'program manager')
-                    )
+                    AND {TRACKABLE_WINDOW_SQL}
                 GROUP BY s.id, sw.category
             )
             GROUP BY category
             ORDER BY SUM(overlap_ms) DESC
             LIMIT 12
-            ",
-        )
-        .map_err(|error| error.to_string())?;
+            "
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
 
     let rows = stmt
         .query_map(params![start_ms, end_ms], |row| {
@@ -682,9 +710,8 @@ fn app_summaries(
     end_ms: i64,
     total_ms: i64,
 ) -> Result<Vec<AppSummary>, String> {
-    let mut stmt = conn
-        .prepare(
-            "
+    let sql = format!(
+        "
             SELECT app_name, category, SUM(overlap_ms), SUM(focus_ms), MAX(last_seen)
             FROM (
                 SELECT
@@ -702,18 +729,15 @@ fn app_summaries(
                 FROM segment_windows sw
                 JOIN activity_segments s ON s.id = sw.segment_id
                 WHERE s.end_at > ?1 AND s.start_at < ?2 AND s.idle = 0
-                    AND NOT (
-                        lower(sw.app_name) = 'explorer.exe'
-                        AND lower(trim(sw.window_title)) IN ('', 'program manager')
-                    )
+                    AND {TRACKABLE_WINDOW_SQL}
                 GROUP BY s.id, sw.app_name, sw.category
             )
             GROUP BY app_name, category
             ORDER BY SUM(overlap_ms) DESC
             LIMIT 16
-            ",
-        )
-        .map_err(|error| error.to_string())?;
+            "
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
 
     let rows = stmt
         .query_map(params![start_ms, end_ms], |row| {
@@ -740,9 +764,8 @@ fn window_summaries(
     end_ms: i64,
 ) -> Result<Vec<WindowSummary>, String> {
     let total_ms = visible_ms(conn, start_ms, end_ms, "s.idle = 0")?;
-    let mut stmt = conn
-        .prepare(
-            "
+    let sql = format!(
+        "
             SELECT app_name, window_title, category, SUM(overlap_ms), SUM(focus_ms)
             FROM (
                 SELECT
@@ -758,17 +781,14 @@ fn window_summaries(
                 FROM segment_windows sw
                 JOIN activity_segments s ON s.id = sw.segment_id
                 WHERE s.end_at > ?1 AND s.start_at < ?2 AND s.idle = 0
-                    AND NOT (
-                        lower(sw.app_name) = 'explorer.exe'
-                        AND lower(trim(sw.window_title)) IN ('', 'program manager')
-                    )
+                    AND {TRACKABLE_WINDOW_SQL}
             )
             GROUP BY app_name, window_title, category
             ORDER BY SUM(overlap_ms) DESC
             LIMIT 12
-            ",
-        )
-        .map_err(|error| error.to_string())?;
+            "
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
 
     let rows = stmt
         .query_map(params![start_ms, end_ms], |row| {
@@ -792,9 +812,8 @@ fn activity_tracks(
     start_ms: i64,
     end_ms: i64,
 ) -> Result<Vec<ActivityTrack>, String> {
-    let mut stmt = conn
-        .prepare(
-            "
+    let sql = format!(
+        "
             SELECT
                 sw.app_name,
                 sw.category,
@@ -804,15 +823,12 @@ fn activity_tracks(
             FROM segment_windows sw
             JOIN activity_segments s ON s.id = sw.segment_id
             WHERE s.end_at > ?1 AND s.start_at < ?2 AND s.idle = 0
-                AND NOT (
-                    lower(sw.app_name) = 'explorer.exe'
-                    AND lower(trim(sw.window_title)) IN ('', 'program manager')
-                )
+                AND {TRACKABLE_WINDOW_SQL}
             GROUP BY s.id, sw.app_name, sw.category
             ORDER BY clipped_start ASC
-            ",
-        )
-        .map_err(|error| error.to_string())?;
+            "
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
 
     let rows = stmt
         .query_map(params![start_ms, end_ms], |row| {
@@ -879,8 +895,7 @@ fn timeline(
     for (label, bucket_start_ms, bucket_end_ms) in timeline_buckets(start_ms, end_ms, bucket)? {
         points.push(TimelinePoint {
             hour: label,
-            active_seconds: segment_sum_ms(conn, bucket_start_ms, bucket_end_ms, "idle = 0")?
-                / 1_000,
+            active_seconds: active_visible_ms(conn, bucket_start_ms, bucket_end_ms)? / 1_000,
             idle_seconds: segment_sum_ms(conn, bucket_start_ms, bucket_end_ms, "idle = 1")? / 1_000,
             top_apps: bucket_top_apps(conn, bucket_start_ms, bucket_end_ms)?,
         });
@@ -894,9 +909,8 @@ fn bucket_top_apps(
     start_ms: i64,
     end_ms: i64,
 ) -> Result<Vec<TimelineApp>, String> {
-    let mut stmt = conn
-        .prepare(
-            "
+    let sql = format!(
+        "
             SELECT app_name, category, SUM(overlap_ms)
             FROM (
                 SELECT
@@ -907,18 +921,15 @@ fn bucket_top_apps(
                 FROM segment_windows sw
                 JOIN activity_segments s ON s.id = sw.segment_id
                 WHERE s.end_at > ?1 AND s.start_at < ?2 AND s.idle = 0
-                    AND NOT (
-                        lower(sw.app_name) = 'explorer.exe'
-                        AND lower(trim(sw.window_title)) IN ('', 'program manager')
-                    )
+                    AND {TRACKABLE_WINDOW_SQL}
                 GROUP BY s.id, sw.app_name, sw.category
             )
             GROUP BY app_name, category
             ORDER BY SUM(overlap_ms) DESC
             LIMIT 3
-            ",
-        )
-        .map_err(|error| error.to_string())?;
+            "
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|error| error.to_string())?;
 
     let rows = stmt
         .query_map(params![start_ms, end_ms], |row| {
@@ -1236,6 +1247,79 @@ mod tests {
                 .unwrap()
                 .seconds,
             1_200
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn filters_ignored_overlay_windows_from_dashboard_totals() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("pctime-overlay-filter-test-{unique}"));
+        let (db_path, _) = init_database(&root, &root).unwrap();
+        let start_ms = 1_800_000_000_000_i64;
+        let duration_ms = 600_000_u64;
+
+        let overlay = test_sample(
+            "NVIDIA Overlay.exe",
+            "NVIDIA Overlay",
+            "Unclassified",
+            false,
+        );
+        insert_samples(&db_path, start_ms, duration_ms, false, 0, &[overlay]).unwrap();
+
+        let samples = vec![
+            test_sample("Codex.exe", "PCTime", "Development", true),
+            test_sample(
+                "NVIDIA Overlay.exe",
+                "NVIDIA Overlay",
+                "Unclassified",
+                false,
+            ),
+        ];
+        insert_samples(
+            &db_path,
+            start_ms + duration_ms as i64,
+            duration_ms,
+            false,
+            0,
+            &samples,
+        )
+        .unwrap();
+
+        let dashboard = dashboard(
+            &db_path,
+            "install_dir",
+            true,
+            300,
+            1_000,
+            Some(RangeQuery {
+                preset: "custom".to_string(),
+                start_ms: Some(start_ms),
+                end_ms: Some(start_ms + duration_ms as i64 * 2),
+                start_of_day_minutes: None,
+                week_start: None,
+            }),
+            Vec::new(),
+        )
+        .unwrap();
+
+        assert_eq!(dashboard.active_seconds, 600);
+        assert!(dashboard
+            .apps
+            .iter()
+            .all(|app| app.app_name != "NVIDIA Overlay.exe"));
+        assert_eq!(
+            dashboard
+                .apps
+                .iter()
+                .find(|app| app.app_name == "Codex.exe")
+                .unwrap()
+                .seconds,
+            600
         );
 
         let _ = fs::remove_dir_all(root);

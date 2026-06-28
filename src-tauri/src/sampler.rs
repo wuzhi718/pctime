@@ -3,6 +3,7 @@ use std::path::Path;
 use chrono::Local;
 
 use crate::collector;
+use crate::ignored;
 use crate::models::{CaptureStats, LiveWindow, WindowSample};
 use crate::storage;
 use crate::visibility;
@@ -64,7 +65,10 @@ pub fn live_windows() -> Result<Vec<LiveWindow>, String> {
 }
 
 fn current_samples() -> Result<Vec<WindowSample>, String> {
-    let raw = collector::collect_windows()?;
+    let raw = collector::collect_windows()?
+        .into_iter()
+        .filter(|window| !ignored::should_ignore_raw_window(window))
+        .collect();
     Ok(visibility::compute_visible_windows(raw))
 }
 

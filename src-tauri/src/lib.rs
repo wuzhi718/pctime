@@ -1,6 +1,7 @@
 mod classifier;
 mod collector;
 mod commands;
+mod ignored;
 mod models;
 mod sampler;
 mod storage;
